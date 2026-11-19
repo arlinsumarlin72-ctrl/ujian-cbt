@@ -65,9 +65,10 @@
       [['each', 'Per nomor'], ['10', 'Per 10'], ['20', 'Per 20'], ['custom', 'Atur sendiri'], ['end', 'Di akhir']].map(function (f) {
         return '<label class="' + (f[0] === 'end' ? 'on' : '') + '"><input type="radio" name="fb" value="' + f[0] + '"' + (f[0] === 'end' ? ' checked' : '') + ' data-change="fb-pick">' + f[1] + '</label>';
       }).join('') + '</div>' +
-      '<div class="field" id="fbn-wrap" style="display:none"><label for="fbn">Tampilkan kunci setiap berapa nomor?</label><input id="fbn" name="fbn" class="input" type="number" min="1" max="500" placeholder="contoh: 5" style="max-width:180px"></div></div>' +
+      '<div class="field" id="fbn-wrap" style="display:none"><label for="fbn">Tampilkan kunci setiap berapa nomor?</label><input id="fbn" name="fbn" class="input" type="number" min="1" max="500" placeholder="contoh: 5" style="max-width:180px"></div>' +
+      '<div class="col" id="rv-wrap" style="gap:8px;display:none"><span class="label">Setelah blok diselesaikan, jawaban benar ditampilkan</span><div class="seg"><label class="on"><input type="radio" name="rv" value="all" checked data-change="rv-pick">Sekaligus</label><label><input type="radio" name="rv" value="step" data-change="rv-pick">Satu per satu</label></div></div></div>' +
       '<button class="btn btn-primary" style="height:50px" type="submit"' + (avail.length ? '' : ' disabled') + '>Buat sesi dan acak soal</button>' +
-      '<p class="small muted">Soal diacak satu kali saat sesi dibuat, jadi semua peserta mendapat set yang sama.</p></form>' +
+      '<p class="small muted">Soal diacak satu kali saat sesi dibuat, jadi semua peserta mendapat set yang sama. Kalau memilih beberapa sistem, jumlah soal dibagi rata per sistem (Kulit &amp; Kelamin, GEH, Neurologi, Obstetri &amp; Ginekologi).</p></form>' +
       '<div class="card grow" style="flex:1 1 460px"><h2 class="bold" style="font-size:20px">Daftar sesi</h2>' +
       (ST.sessions.length ? '<div class="scroll-x"><table class="table"><thead><tr><th>Sesi</th><th>Soal</th><th>Selesai</th><th>Status</th><th>Aksi</th></tr></thead><tbody>' +
         ST.sessions.map(function (s) {
@@ -75,8 +76,9 @@
             '<td>' + s.total + '</td><td>' + s.finished + (s.ongoing ? ' <span class="small muted">(+' + s.ongoing + ' berjalan)</span>' : '') + '</td>' +
             '<td>' + (s.status === 'open' ? '<span class="badge b-info">Terbuka</span>' : '<span class="badge b-bad">Ditutup</span>') + '</td>' +
             '<td><div class="row" style="gap:8px"><button class="btn btn-sm" type="button" data-act="sess-toggle" data-v="' + s.id + '" data-s="' + s.status + '">' + (s.status === 'open' ? 'Tutup' : 'Buka') + '</button>' +
+            '<button class="btn btn-sm" type="button" data-act="sess-people" data-v="' + s.id + '">' + (ST.openSess === s.id ? 'Tutup peserta' : 'Peserta') + '</button>' +
             '<a class="btn btn-sm" href="#/peringkat/' + s.id + '">Peringkat</a>' +
-            '<button class="btn btn-sm btn-danger" type="button" data-act="sess-del" data-v="' + s.id + '" data-t="' + esc(s.title) + '">Hapus</button></div></td></tr>';
+            '<button class="btn btn-sm btn-danger" type="button" data-act="sess-del" data-v="' + s.id + '" data-t="' + esc(s.title) + '">Hapus</button></div></td></tr>' + (ST.openSess === s.id ? attHtml(s) : '');
         }).join('') + '</tbody></table></div>' : '<p class="muted">Belum ada sesi.</p>') + '</div></div>';
     A.setMain(html);
     H['pool-calc']();
@@ -90,6 +92,10 @@
   H['fb-pick'] = function (el) {
     el.closest('.seg').querySelectorAll('label').forEach(function (l) { l.classList.toggle('on', l.contains(el)); });
     var w = document.getElementById('fbn-wrap'); if (w) w.style.display = el.value === 'custom' ? '' : 'none';
+    var rw = document.getElementById('rv-wrap'); if (rw) rw.style.display = (el.value === '10' || el.value === '20' || el.value === 'custom') ? '' : 'none';
+  };
+  H['rv-pick'] = function (el) {
+    el.closest('.seg').querySelectorAll('label').forEach(function (l) { l.classList.toggle('on', l.contains(el)); });
   };
   H['create-session'] = async function (form) {
     var banks = Array.prototype.map.call(form.querySelectorAll('input[name=bank]:checked'), function (c) { return c.value; });
@@ -101,6 +107,7 @@
       if (!nn || nn < 1 || nn > cnt) { A.toast('Isi angka 1 sampai ' + cnt + ' untuk "tiap berapa nomor".', true); return; }
       fb = String(nn);
     }
+    if (/^[0-9]+$/.test(fb) && form.elements.rv && form.elements.rv.value === 'step') fb += 's';
     btn.disabled = true;
     try {
       await Api.call('adm_create_session', {
@@ -110,6 +117,41 @@
       A.toast('Sesi dibuat. Peserta bisa langsung mengerjakan.');
       sesiTab();
     } catch (e) { A.toast(e.message, true); btn.disabled = false; }
+  };
+  function attHtml(s) {
+    var att = ST.att || [], pending = att.filter(function (x) { return !x.submitted; }).length;
+    return '<tr><td colspan="5"><div class="col" style="gap:10px;padding:8px 0">' +
+      '<div class="row row-c between"><span class="bold">Peserta di sesi ini (' + att.length + ')</span>' +
+      (pending ? '<button class="btn btn-sm btn-primary" type="button" data-act="att-submit-all" data-v="' + s.id + '">Kumpulkan semua yang belum selesai (' + pending + ')</button>' : '') + '</div>' +
+      (att.length ? att.map(function (x) {
+        return '<div class="row row-c between" style="gap:10px;border-top:1px solid var(--line-2);padding-top:8px"><span class="row row-c" style="gap:10px;flex-wrap:nowrap">' + A.avatar(x.name, x.avatar_color) + '<span class="bold">' + esc(x.name) + '</span></span>' +
+          '<span class="small muted">' + (x.submitted ? 'Selesai, skor ' + x.score + ' dari ' + x.total : 'Mengerjakan: ' + x.answered + ' dari ' + x.total + ' terjawab' + (x.locked ? ', ' + x.locked + ' soal terkunci' : '')) + '</span>' +
+          (x.submitted ? '<span class="badge b-ok">Sudah dikumpulkan</span>' : '<button class="btn btn-sm" type="button" data-act="att-submit" data-s="' + s.id + '" data-v="' + x.profile_id + '" data-n="' + esc(x.name) + '">Kumpulkan jawabannya</button>') + '</div>';
+      }).join('') : '<p class="muted small">Belum ada peserta yang membuka sesi ini.</p>') +
+      '</div></td></tr>';
+  }
+  async function reloadAtt() {
+    ST.sessions = await Api.call('adm_sessions');
+    ST.att = ST.openSess ? await Api.call('adm_attempts', { p_session: ST.openSess }) : [];
+    renderSesi();
+  }
+  H['sess-people'] = async function (el) {
+    var id = el.dataset.v;
+    if (ST.openSess === id) { ST.openSess = null; ST.att = []; renderSesi(); return; }
+    try { ST.att = await Api.call('adm_attempts', { p_session: id }); ST.openSess = id; renderSesi(); }
+    catch (e) { A.toast(e.message, true); }
+  };
+  H['att-submit'] = async function (el) {
+    var ok = await A.confirmDialog('Kumpulkan jawaban ' + el.dataset.n + '?', 'Jawaban yang sudah terisi akan dikumpulkan dan dinilai sekarang. Peserta tidak bisa mengubahnya lagi.', 'Kumpulkan', false);
+    if (!ok) return;
+    try { await Api.call('adm_submit_attempts', { p_session: el.dataset.s, p_profile: el.dataset.v }); A.toast('Jawaban dikumpulkan.'); await reloadAtt(); }
+    catch (e) { A.toast(e.message, true); }
+  };
+  H['att-submit-all'] = async function (el) {
+    var ok = await A.confirmDialog('Kumpulkan semua jawaban?', 'Semua peserta yang belum menyelesaikan sesi ini akan dikumpulkan dan dinilai sekarang. Soal yang belum dijawab dihitung salah.', 'Kumpulkan semua', true);
+    if (!ok) return;
+    try { var r = await Api.call('adm_submit_attempts', { p_session: el.dataset.v }); A.toast(r.submitted + ' jawaban dikumpulkan.'); await reloadAtt(); }
+    catch (e) { A.toast(e.message, true); }
   };
   H['sess-toggle'] = async function (el) {
     try { await Api.call('adm_set_session_status', { p_session: el.dataset.v, p_status: el.dataset.s === 'open' ? 'closed' : 'open' }); sesiTab(); }
@@ -133,9 +175,16 @@
         return '<tr><td><span class="row row-c" style="gap:10px;flex-wrap:nowrap">' + A.avatar(p.name, p.avatar_color) + '<span class="bold">' + esc(p.name) + '</span></span></td>' +
           '<td>' + (p.role === 'admin' ? '<span class="badge b-info">Admin</span>' : 'Peserta') + '</td><td>' + p.done + '</td>' +
           '<td><div class="row" style="gap:8px"><button class="btn btn-sm" type="button" data-act="pin-reset" data-v="' + p.id + '" data-n="' + esc(p.name) + '">Atur ulang PIN</button>' +
-          '<button class="btn btn-sm" type="button" data-act="role-toggle" data-v="' + p.id + '" data-r="' + p.role + '">' + (p.role === 'admin' ? 'Jadikan peserta' : 'Jadikan admin') + '</button></div></td></tr>';
+          '<button class="btn btn-sm" type="button" data-act="role-toggle" data-v="' + p.id + '" data-r="' + p.role + '">' + (p.role === 'admin' ? 'Jadikan peserta' : 'Jadikan admin') + '</button>' +
+          (p.role === 'admin' ? '' : '<button class="btn btn-sm btn-danger" type="button" data-act="prof-del" data-v="' + p.id + '" data-n="' + esc(p.name) + '">Hapus</button>') + '</div></td></tr>';
       }).join('') + '</tbody></table></div></div>');
   }
+  H['prof-del'] = async function (el) {
+    var ok = await A.confirmDialog('Hapus peserta?', 'Akun "' + el.dataset.n + '" beserta semua hasil dan jawabannya akan dihapus permanen.', 'Hapus', true);
+    if (!ok) return;
+    try { await Api.call('adm_delete_profile', { p_profile: el.dataset.v }); A.toast('Peserta dihapus.'); pesertaTab(); }
+    catch (e) { A.toast(e.message, true); }
+  };
   H['pin-reset'] = async function (el) {
     var pin = await A.promptDialog('Atur ulang PIN: ' + el.dataset.n, 'PIN baru (4-6 angka)', 'password');
     if (pin == null) return;
