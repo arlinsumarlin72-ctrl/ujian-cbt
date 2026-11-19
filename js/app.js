@@ -230,10 +230,48 @@
     if (!ok() || S.exam !== E) return;
     renderExam();
     var tick = setInterval(tickTimer, 1000);
-    onCleanup(function () { clearInterval(tick); clearTimeout(E.saveT); document.removeEventListener('keydown', onExamKey); });
+    var poll = setInterval(pollRev, 8000);
+    onCleanup(function () { clearInterval(tick); clearInterval(poll); clearTimeout(E.saveT); document.removeEventListener('keydown', onExamKey); });
     document.addEventListener('keydown', onExamKey);
     tickTimer();
   }
+
+  async function pollRev() {
+    var E = S.exam; if (!E || E.submitting || E.swapBusy) return;
+    var d;
+    try { d = await Api.call('app_rev', { p_session: E.id }); } catch (e) { return; }
+    if (S.exam !== E || !d || d.rev === E.session.rev) return;
+    await refreshExam(d.notice || 'Ada soal yang diganti oleh admin.');
+  }
+  async function refreshExam(notice) {
+    var E = S.exam; if (!E) return;
+    var d;
+    try { d = await Api.call('app_start', { p_session: E.id }); } catch (e) { return; }
+    if (S.exam !== E || !d || d.submitted) return;
+    clearTimeout(E.saveT); E.dirty = false;
+    E.session.rev = d.session.rev;
+    E.qs = d.questions; E.answers = d.answers || {}; E.flags = d.flags || {}; E.keys = {};
+    if (E.idx > E.qs.length - 1) E.idx = E.qs.length - 1;
+    if (E.session.feedback_mode !== 'end') {
+      var answered = E.qs.filter(function (q) { return E.answers[q.id]; }).map(function (q) { return q.id; });
+      if (answered.length) {
+        try { Object.assign(E.keys, await Api.call('app_reveal', { p_session: E.id, p_qids: answered })); } catch (e) { /* abaikan */ }
+      }
+    }
+    if (S.exam !== E) return;
+    renderExam();
+    if (notice) dialog({ title: 'Soal diganti', text: notice, buttons: [{ label: 'Mengerti', value: true, cls: 'btn-primary' }] });
+  }
+  H.swap = async function () {
+    var E = S.exam; if (!E || !S.me || S.me.role !== 'admin' || E.swapBusy) return;
+    var q = cur();
+    var ok = await confirmDialog('Ganti soal ini?', 'Soal nomor ' + (E.idx + 1) + ' akan diganti soal baru dari bank yang sama untuk SEMUA peserta. Jawaban peserta pada soal ini dihapus dan mereka mendapat pemberitahuan.', 'Ganti', true);
+    if (!ok) return;
+    E.swapBusy = true;
+    try { await Api.call('adm_swap_question', { p_session: E.id, p_qid: q.id }); await refreshExam(null); toast('Soal diganti.'); }
+    catch (e) { toast(e.message, true); }
+    E.swapBusy = false;
+  };
 
   function tickTimer() {
     var E = S.exam; if (!E) return;
@@ -311,6 +349,7 @@
       '<div class="opts" role="group" aria-label="Pilihan jawaban">' + opts + '</div>' + blockMsg + '</div>' +
       '<div class="nav-actions exam-foot"><button class="btn" type="button" data-act="prev"' + (E.idx === 0 ? ' disabled' : '') + '>Sebelumnya</button>' +
       '<button class="btn btn-warn' + (flagged ? ' on' : '') + '" type="button" data-act="flag" aria-pressed="' + flagged + '">' + (flagged ? 'Hapus tanda ragu-ragu' : 'Tandai ragu-ragu') + '</button>' +
+      (S.me && S.me.role === 'admin' ? '<button class="btn btn-danger" type="button" data-act="swap">Ganti soal ini</button>' : '') +
       '<button class="btn only-mobile" type="button" data-act="panel">Daftar soal</button>' +
       '<button class="btn btn-primary" type="button" data-act="next"' + (E.idx === total - 1 ? ' disabled' : '') + '>Selanjutnya</button></div></div>' +
       '<aside class="exam-side' + (E.panel ? '' : ' closed') + '" aria-label="Navigasi soal"><span class="bold" style="font-size:16px">Navigasi soal</span>' +
