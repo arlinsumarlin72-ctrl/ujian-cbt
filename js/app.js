@@ -9,7 +9,7 @@
 
   var AVATARS = ['#0E6A73', '#2F6DA8', '#7A4E9C', '#A5551C', '#B13A5F', '#5E7A1F', '#4A5A66', '#8A6A00'];
   var FB_LABEL = { each: 'Kunci tampil per nomor', '10': 'Kunci tampil tiap 10 soal', '20': 'Kunci tampil tiap 20 soal', end: 'Kunci tampil di akhir' };
-  function fbLabel(m) { return FB_LABEL[m] || (/^\d+$/.test(m || '') ? 'Kunci tampil tiap ' + (+m) + ' soal' : ''); }
+  function fbLabel(m) { if (FB_LABEL[m]) return FB_LABEL[m]; var x = /^([0-9]+)(s?)$/.exec(m || ''); return x ? 'Kunci tampil tiap ' + (+x[1]) + ' soal, ' + (x[2] ? 'dibuka satu per satu' : 'sekaligus') : ''; }
 
   /* ---------- utilitas ---------- */
   function esc(s) {
@@ -22,6 +22,26 @@
     sec = Math.max(0, Math.round(sec || 0));
     var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
     return h ? h + ':' + pad(m) + ':' + pad(s) : pad(m) + ':' + pad(s);
+  }
+  function modeInfo(m) {
+    m = m || '';
+    if (m === 'each') return { kind: 'each' };
+    var x = /^([0-9]+)(s?)$/.exec(m);
+    if (x) return { kind: 'block', n: +x[1], step: !!x[2] };
+    return { kind: 'end' };
+  }
+  var audioCtx = null;
+  function beep() {
+    try {
+      var C = window.AudioContext || window.webkitAudioContext; if (!C) return;
+      audioCtx = audioCtx || new C();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      var o = audioCtx.createOscillator(), g = audioCtx.createGain(), t = audioCtx.currentTime;
+      o.type = 'sine'; o.frequency.setValueAtTime(880, t); o.frequency.setValueAtTime(1175, t + 0.2);
+      g.gain.setValueAtTime(0.18, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
+      o.connect(g); g.connect(audioCtx.destination); o.start(t); o.stop(t + 0.6);
+      if (navigator.vibrate) navigator.vibrate([120, 60, 120]);
+    } catch (e) { /* abaikan */ }
   }
   function pct(a, b) { return b ? Math.round((a / b) * 100) : 0; }
   function initial(name) { return esc(String(name || '?').trim().charAt(0).toUpperCase()); }
@@ -215,17 +235,15 @@
     var E = S.exam = {
       id: id, session: d.session, qs: d.questions, answers: d.answers || {}, flags: d.flags || {}, keys: {},
       idx: 0, startedAt: Date.now() - (d.elapsed || 0) * 1000, dirty: false, chain: Promise.resolve(),
-      saveT: null, panel: false, submitting: false, saveState: ''
+      saveT: null, panel: false, submitting: false, saveState: '', locked: d.locked || 0, notified: -1
     };
     E.endAt = d.session.timer_minutes ? E.startedAt + d.session.timer_minutes * 60000 : null;
     var first = E.qs.findIndex(function (q) { return !E.answers[q.id]; });
     E.idx = first < 0 ? 0 : first;
 
-    if (E.session.feedback_mode !== 'end') {
-      var answered = E.qs.filter(function (q) { return E.answers[q.id]; }).map(function (q) { return q.id; });
-      if (answered.length) {
-        try { Object.assign(E.keys, await Api.call('app_reveal', { p_session: id, p_qids: answered })); } catch (e) { /* abaikan */ }
-      }
+    var rid = revealIds(E);
+    if (rid.length) {
+      try { Object.assign(E.keys, await Api.call('app_reveal', { p_session: id, p_qids: rid })); } catch (e) { /* abaikan */ }
     }
     if (!ok() || S.exam !== E) return;
     renderExam();
@@ -236,27 +254,63 @@
     tickTimer();
   }
 
+  function revealIds(E) {
+    var mi = modeInfo(E.session.feedback_mode);
+    if (mi.kind === 'each') return E.qs.filter(function (q) { return E.answers[q.id]; }).map(function (q) { return q.id; });
+    if (mi.kind === 'block' && !mi.step) return E.qs.slice(0, E.locked).map(function (q) { return q.id; });
+    return [];
+  }
+  H['fin-block'] = async function () {
+    var E = S.exam; if (!E || E.finBusy || E.submitting || E.locked >= E.qs.length) return;
+    var nb = blockInfo(E, E.locked); if (!nb) return;
+    var txt = (nb.left ? 'Masih ada ' + nb.left + ' soal yang belum dijawab di blok ini, dan soal itu dihitung salah. ' : 'Semua soal di blok ini sudah dijawab. ') +
+      'Setelah diselesaikan, jawaban blok ini terkunci dan tidak bisa diubah. ' + (nb.step ? 'Jawaban benar bisa dibuka satu per satu.' : 'Kunci jawaban langsung ditampilkan.');
+    var ok = await confirmDialog('Yakin selesaikan blok soal ' + (nb.start + 1) + ' sampai ' + (nb.end + 1) + '?', txt, 'Ya, selesaikan', false);
+    if (!ok || S.exam !== E) return;
+    E.finBusy = true; renderExam();
+    try {
+      clearTimeout(E.saveT); E.dirty = false;
+      var r = await Api.call('app_finalize', { p_session: E.id, p_answers: E.answers, p_flags: E.flags });
+      E.locked = r.locked;
+      var rid = revealIds(E).filter(function (id) { return !E.keys[id]; });
+      if (rid.length) Object.assign(E.keys, await Api.call('app_reveal', { p_session: E.id, p_qids: rid }));
+      E.notified = nb.start;
+      toast('Blok ' + (nb.start + 1) + ' sampai ' + (nb.end + 1) + ' diselesaikan.');
+    } catch (err) { toast(err.message, true); }
+    E.finBusy = false;
+    if (S.exam === E) renderExam();
+  };
+  H['show-key'] = async function () {
+    var E = S.exam; if (!E) return;
+    var q = cur();
+    if (E.keys[q.id] || E.idx >= E.locked) return;
+    try {
+      Object.assign(E.keys, await Api.call('app_reveal', { p_session: E.id, p_qids: [q.id] }));
+      if (S.exam === E) renderExam();
+    } catch (err) { toast(err.message, true); }
+  };
   async function pollRev() {
     var E = S.exam; if (!E || E.submitting || E.swapBusy) return;
     var d;
     try { d = await Api.call('app_rev', { p_session: E.id }); } catch (e) { return; }
-    if (S.exam !== E || !d || d.rev === E.session.rev) return;
+    if (S.exam !== E || !d) return;
+    if (d.submitted) { toast('Jawabanmu sudah dikumpulkan oleh admin.'); var sid = E.id; S.exam = null; go('#/hasil/' + sid); return; }
+    if (d.rev === E.session.rev) return;
     await refreshExam(d.notice || 'Ada soal yang diganti oleh admin.');
   }
   async function refreshExam(notice) {
     var E = S.exam; if (!E) return;
     var d;
     try { d = await Api.call('app_start', { p_session: E.id }); } catch (e) { return; }
-    if (S.exam !== E || !d || d.submitted) return;
+    if (S.exam !== E || !d) return;
+    if (d.submitted) { var sid2 = E.id; S.exam = null; go('#/hasil/' + sid2); return; }
     clearTimeout(E.saveT); E.dirty = false;
     E.session.rev = d.session.rev;
-    E.qs = d.questions; E.answers = d.answers || {}; E.flags = d.flags || {}; E.keys = {};
+    E.qs = d.questions; E.answers = d.answers || {}; E.flags = d.flags || {}; E.keys = {}; E.locked = d.locked || 0;
     if (E.idx > E.qs.length - 1) E.idx = E.qs.length - 1;
-    if (E.session.feedback_mode !== 'end') {
-      var answered = E.qs.filter(function (q) { return E.answers[q.id]; }).map(function (q) { return q.id; });
-      if (answered.length) {
-        try { Object.assign(E.keys, await Api.call('app_reveal', { p_session: E.id, p_qids: answered })); } catch (e) { /* abaikan */ }
-      }
+    var rid = revealIds(E);
+    if (rid.length) {
+      try { Object.assign(E.keys, await Api.call('app_reveal', { p_session: E.id, p_qids: rid })); } catch (e) { /* abaikan */ }
     }
     if (S.exam !== E) return;
     renderExam();
@@ -290,12 +344,11 @@
   }
 
   function blockInfo(E, idx) {
-    var m = E.session.feedback_mode;
-    if (!/^\d+$/.test(m || '')) return null;
-    var n = +m, total = E.qs.length, s = Math.floor(idx / n) * n, e = Math.min(s + n, total) - 1;
-    var left = 0;
-    for (var i = s; i <= e; i++) if (!E.answers[E.qs[i].id]) left++;
-    return { start: s, end: e, left: left };
+    var mi = modeInfo(E.session.feedback_mode);
+    if (mi.kind !== 'block') return null;
+    var n = mi.n, total = E.qs.length, s0 = Math.floor(idx / n) * n, e0 = Math.min(s0 + n, total) - 1, left = 0;
+    for (var i = s0; i <= e0; i++) if (!E.answers[E.qs[i].id]) left++;
+    return { start: s0, end: e0, size: e0 - s0 + 1, left: left, locked: E.locked > e0, step: mi.step };
   }
 
   function renderExam() {
@@ -312,17 +365,24 @@
         if (L === key) { cls = 'key'; tag = sel === key ? 'Kunci (jawabanmu)' : 'Kunci'; }
         else if (L === sel) { cls = 'wrong'; tag = 'Jawabanmu'; }
       } else if (L === sel) cls = 'sel';
-      return '<button type="button" class="opt ' + cls + '" data-act="pick" data-v="' + L + '" data-l="' + L + '"' + (key || E.submitting ? ' disabled' : '') +
+      return '<button type="button" class="opt ' + cls + '" data-act="pick" data-v="' + L + '" data-l="' + L + '"' + (key || E.submitting || E.idx < E.locked ? ' disabled' : '') +
         ' aria-pressed="' + (L === sel) + '"><span class="l">' + L + '</span><span class="t">' + esc(t) + '</span>' +
         (tag ? '<span class="tag">' + tag + '</span>' : '') + '</button>';
     }).join('');
 
     var status = '';
     if (key) status = sel === key ? '<span class="badge b-ok">Benar</span>' : '<span class="badge b-bad">Salah</span>';
-    var bi = blockInfo(E, E.idx), blockMsg = '';
+    var bi = blockInfo(E, E.idx), blockMsg = '', finBar = '';
     if (bi && !key) {
-      blockMsg = '<div class="notice">Kunci blok soal ' + (bi.start + 1) + ' sampai ' + (bi.end + 1) + ' tampil setelah semuanya dijawab' +
-        (bi.left ? ' (' + bi.left + ' soal lagi).' : '.') + '</div>';
+      if (E.idx < E.locked) blockMsg = '<div class="notice">Blok ini sudah diselesaikan. <button class="btn btn-sm btn-primary" type="button" data-act="show-key">Lihat jawaban nomor ' + (E.idx + 1) + '</button></div>';
+      else blockMsg = '<div class="notice">Kunci blok soal ' + (bi.start + 1) + ' sampai ' + (bi.end + 1) + ' tampil setelah blok diselesaikan.</div>';
+    }
+    if (bi && E.locked < total) {
+      var nb = blockInfo(E, E.locked);
+      finBar = '<div class="notice" style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap"><span>Blok soal ' + (nb.start + 1) + ' sampai ' + (nb.end + 1) + ': <b>' + (nb.size - nb.left) + ' dari ' + nb.size + '</b> terjawab' + (nb.left === 0 ? '. Siap diselesaikan.' : '.') + '</span>' +
+        '<button class="btn btn-sm' + (nb.left === 0 ? ' btn-primary' : '') + '" type="button" data-act="fin-block"' + (E.finBusy ? ' disabled' : '') + '>Selesaikan blok ' + (nb.start + 1) + ' sampai ' + (nb.end + 1) + '</button></div>';
+    } else if (bi && E.locked >= total) {
+      finBar = '<div class="notice">Semua blok sudah diselesaikan. Tekan Kumpulkan untuk mengakhiri sesi.</div>';
     }
 
     var nav = E.qs.map(function (x, i) {
@@ -346,7 +406,7 @@
       '<div class="exam-body"><div class="exam-main"><div class="qcard">' +
       '<div class="row row-c"><span class="chip">Asal soal: ' + esc(q.bank) + '</span><span class="small bold muted">Soal ' + (E.idx + 1) + '</span>' + status + '</div>' +
       '<p class="stem">' + esc(q.stem) + '</p>' + (img ? '<img class="qimg" src="' + img + '" alt="Gambar pada soal">' : '') +
-      '<div class="opts" role="group" aria-label="Pilihan jawaban">' + opts + '</div>' + blockMsg + '</div>' +
+      '<div class="opts" role="group" aria-label="Pilihan jawaban">' + opts + '</div>' + blockMsg + finBar + '</div>' +
       '<div class="nav-actions exam-foot"><button class="btn" type="button" data-act="prev"' + (E.idx === 0 ? ' disabled' : '') + '>Sebelumnya</button>' +
       '<button class="btn btn-warn' + (flagged ? ' on' : '') + '" type="button" data-act="flag" aria-pressed="' + flagged + '">' + (flagged ? 'Hapus tanda ragu-ragu' : 'Tandai ragu-ragu') + '</button>' +
       (S.me && S.me.role === 'admin' ? '<button class="btn btn-danger" type="button" data-act="swap">Ganti soal ini</button>' : '') +
@@ -380,7 +440,7 @@
   function pickLetter(L) {
     var E = S.exam; if (!E || E.submitting) return;
     var q = cur();
-    if (E.keys[q.id]) return;
+    if (E.keys[q.id] || E.idx < E.locked) return;
     if (q.options.length <= 'ABCDE'.indexOf(L)) return;
     if (E.answers[q.id] === L) delete E.answers[q.id]; else E.answers[q.id] = L;
     renderExam(); focusOpt(L);
@@ -432,26 +492,28 @@
 
   async function maybeReveal() {
     var E = S.exam; if (!E) return;
-    var m = E.session.feedback_mode;
-    if (m === 'end') return;
-    var q = cur(), ids = [];
-    if (m === 'each') {
-      if (E.answers[q.id] && !E.keys[q.id]) ids = [q.id];
-    } else {
-      var bi = blockInfo(E, E.idx);
-      if (bi && bi.left === 0) {
-        for (var i = bi.start; i <= bi.end; i++) if (!E.keys[E.qs[i].id]) ids.push(E.qs[i].id);
+    var mi = modeInfo(E.session.feedback_mode);
+    if (mi.kind === 'end') return;
+    if (mi.kind === 'each') {
+      var q = cur();
+      if (E.answers[q.id] && !E.keys[q.id]) {
+        await flushSave();
+        try {
+          var k = await Api.call('app_reveal', { p_session: E.id, p_qids: [q.id] });
+          if (S.exam !== E) return;
+          Object.assign(E.keys, k);
+          renderExam();
+        } catch (err) { toast(err.message, true); }
       }
+      return;
     }
-    if (!ids.length) return;
-    await flushSave();
-    try {
-      var k = await Api.call('app_reveal', { p_session: E.id, p_qids: ids });
-      if (S.exam !== E) return;
-      Object.assign(E.keys, k);
-      renderExam();
-      if (m !== 'each' && Object.keys(k).length) toast('Kunci blok soal ditampilkan.');
-    } catch (err) { toast(err.message, true); }
+    var bi = blockInfo(E, E.idx);
+    if (bi && !bi.locked && bi.left === 0 && E.notified !== bi.start) {
+      E.notified = bi.start;
+      beep();
+      toast('Soal ' + (bi.start + 1) + ' sampai ' + (bi.end + 1) + ' sudah terjawab semua. Tekan "Selesaikan blok" kalau sudah yakin.');
+      try { if (document.hidden && window.Notification && Notification.permission === 'granted') new Notification('Ruang Ujian', { body: 'Blok soal ' + (bi.start + 1) + ' sampai ' + (bi.end + 1) + ' sudah terjawab semua.' }); } catch (e2) { /* abaikan */ }
+    }
   }
 
   H['exam-submit'] = async function () {
@@ -504,26 +566,104 @@
   function renderResult() {
     var r = S.result;
     var rows = r.rows.filter(function (x) { return !S.onlyWrong || x.ok !== true; });
+    var blank = r.rows.filter(function (x) { return x.mine === '-'; }).length;
+    var flagTot = 0, flagOk = 0;
+    r.banks.forEach(function (b) { flagTot += b.flag || 0; flagOk += b.flag_ok || 0; });
+    var sys = r.banks.slice().sort(function (a, b) { return pct(a.correct, a.total) - pct(b.correct, b.total); });
+    var multi = sys.length > 1;
+    var sysHtml = sys.map(function (b, i) {
+      var p = pct(b.correct, b.total);
+      var tag = multi && i === 0 ? ' <span class="badge b-bad">Perlu diulang</span>' : (multi && i === sys.length - 1 ? ' <span class="badge b-ok">Terkuat</span>' : '');
+      return '<div class="col" style="gap:6px"><div class="row between small" style="gap:12px"><span class="bold">' + esc(b.bank) + tag + '</span><span class="bold">' + b.correct + ' dari ' + b.total + ' (' + p + '%)</span></div>' +
+        '<div class="bar"><i style="width:' + p + '%"></i></div>' +
+        '<div class="small muted">Benar ' + b.correct + ' · Salah ' + (b.wrong || 0) + ' · Kosong ' + (b.blank || 0) + (b.avg != null ? ' · Rata-rata peserta ' + b.avg + '%' : '') + '</div></div>';
+    }).join('');
+    var trend = [];
+    for (var i = 0; i < r.rows.length; i += 10) {
+      var part = r.rows.slice(i, i + 10);
+      trend.push({ a: i + 1, b: i + part.length, c: part.filter(function (x) { return x.ok === true; }).length, n: part.length });
+    }
+    var trendHtml = trend.map(function (t) {
+      return '<div class="col" style="gap:4px"><div class="row between small"><span class="bold">Nomor ' + t.a + ' sampai ' + t.b + '</span><span class="bold">' + t.c + ' dari ' + t.n + '</span></div><div class="bar"><i style="width:' + pct(t.c, t.n) + '%"></i></div></div>';
+    }).join('');
+    var notes = [];
+    if (blank) notes.push('<b>' + blank + ' soal tidak dijawab</b> dan dihitung salah.');
+    if (flagTot) {
+      var fp = pct(flagOk, flagTot), sp = pct(r.score, r.total);
+      notes.push('Dari <b>' + flagTot + ' soal yang kamu tandai ragu-ragu</b>, ' + flagOk + ' benar (' + fp + '%). ' + (fp >= sp ? 'Instingmu cukup baik: ragu-ragu tetapi sering benar.' : 'Soal yang kamu ragukan lebih sering salah, jadi itu petunjuk materi yang belum kuat.'));
+    } else notes.push('Kamu tidak menandai soal ragu-ragu.');
+    if (trend.length > 1) {
+      var f0 = pct(trend[0].c, trend[0].n), l0 = pct(trend[trend.length - 1].c, trend[trend.length - 1].n);
+      if (f0 - l0 >= 20) notes.push('Akurasi turun di bagian akhir (' + f0 + '% lalu ' + l0 + '%). Bisa jadi kelelahan atau terburu-buru, ini dugaan dari pola nilaimu.');
+      else if (l0 - f0 >= 20) notes.push('Akurasimu naik di bagian akhir (' + f0 + '% lalu ' + l0 + '%).');
+    }
+    if (multi) notes.push('Bidang yang paling perlu diulang: <b>' + esc(sys[0].bank) + '</b> (' + pct(sys[0].correct, sys[0].total) + '%).');
     setMain(
       '<div class="row row-c between"><div class="col" style="gap:4px"><span class="page-sub">' + esc(r.title) + '</span><h1 class="page-title">Hasil akhir</h1></div>' +
-      '<a class="btn btn-primary" href="#/peringkat/' + r.id + '">Lihat peringkat</a></div>' +
+      '<div class="row" style="gap:8px"><a class="btn" href="#/tinjau/' + r.id + '">Tinjau semua soal</a><a class="btn btn-primary" href="#/peringkat/' + r.id + '">Lihat peringkat</a></div></div>' +
       '<div class="row"><div class="stat"><span class="page-sub">Skor</span><b style="color:var(--primary-dark)">' + r.score + ' / ' + r.total + '</b><span class="small muted">' + pct(r.score, r.total) + ' persen benar</span></div>' +
       '<div class="stat"><span class="page-sub">Waktu</span><b>' + clock(r.time_taken) + '</b><span class="small muted">menit:detik</span></div>' +
       '<div class="stat"><span class="page-sub">Peringkat sesi ini</span><b>' + r.rank + ' dari ' + r.participants + '</b><span class="small muted">urut skor, lalu waktu tercepat</span></div></div>' +
       '<div class="row"><div class="card grow" style="flex:999 1 600px"><div class="row row-c between"><h2 class="bold" style="font-size:18px">Rincian per nomor</h2>' +
       '<label class="row row-c small bold" style="gap:8px;cursor:pointer"><input type="checkbox" data-change="only-wrong"' + (S.onlyWrong ? ' checked' : '') + ' style="width:18px;height:18px;accent-color:var(--primary)">Hanya yang salah / kosong</label></div>' +
-      '<div class="scroll-x"><table class="table"><thead><tr><th>No</th><th>Asal soal</th><th>Jawabanmu</th><th>Kunci</th><th>Status</th></tr></thead><tbody>' +
+      '<div class="scroll-x"><table class="table"><thead><tr><th>No</th><th>Sistem</th><th>Jawabanmu</th><th>Kunci</th><th>Status</th></tr></thead><tbody>' +
       (rows.length ? rows.map(function (x) {
         return '<tr><td class="bold">' + x.no + (x.flag ? ' <span class="small muted" title="Ditandai ragu-ragu">(?)</span>' : '') + '</td><td>' + esc(x.bank) + '</td><td class="bold">' + esc(x.mine) + '</td><td class="bold">' + esc(x.key || '-') + '</td><td>' + statusBadge(x) + '</td></tr>';
       }).join('') : '<tr><td colspan="5" class="muted">Tidak ada baris.</td></tr>') +
-      '</tbody></table></div><p class="small muted">Tidak ada pembahasan: hanya kunci jawaban dan status.</p></div>' +
-      '<div class="card grow" style="flex:1 1 320px;max-width:420px"><h2 class="bold" style="font-size:18px">Rekap per file</h2>' +
-      r.banks.map(function (b) {
-        return '<div class="col" style="gap:6px"><div class="row between small" style="gap:12px"><span class="bold">' + esc(b.bank) + '</span><span class="bold">' + b.correct + ' dari ' + b.total + ' (' + pct(b.correct, b.total) + '%)</span></div>' +
-          '<div class="bar"><i style="width:' + pct(b.correct, b.total) + '%"></i></div></div>';
-      }).join('') + '<p class="small muted">File dengan persentase paling rendah adalah bidang yang perlu diulang.</p></div></div>');
+      '</tbody></table></div><p class="small muted">Tidak ada pembahasan: hanya kunci jawaban dan status. Pakai "Tinjau semua soal" untuk membuka kembali soalnya.</p></div>' +
+      '<div class="col grow" style="flex:1 1 320px;max-width:440px;gap:16px">' +
+      '<div class="card"><h2 class="bold" style="font-size:18px">Analisis per sistem</h2>' + sysHtml + '<p class="small muted">Dihitung per sistem organ, bukan per file soal.</p></div>' +
+      '<div class="card"><h2 class="bold" style="font-size:18px">Pola jawabanmu</h2>' + notes.map(function (n) { return '<p style="margin:0">' + n + '</p>'; }).join('') + '</div>' +
+      (trend.length > 1 ? '<div class="card"><h2 class="bold" style="font-size:18px">Tren per 10 nomor</h2>' + trendHtml + '</div>' : '') +
+      '</div></div>');
   }
   H['only-wrong'] = function (el) { S.onlyWrong = el.checked; renderResult(); };
+
+  /* ---------- tinjau soal ---------- */
+  async function reviewView(id) {
+    shell('home');
+    var ok = fresh();
+    await guard(async function () {
+      var res = await Api.call('app_review', { p_session: id });
+      if (!ok()) return;
+      S.rv = { id: id, title: res.title, qs: res.questions, filter: 'all', system: 'all' };
+      renderReview();
+    });
+  }
+  function renderReview() {
+    var v = S.rv, letters = ['A', 'B', 'C', 'D', 'E'], systems = [];
+    v.qs.forEach(function (q) { if (systems.indexOf(q.system) < 0) systems.push(q.system); });
+    var list = v.qs.filter(function (q) {
+      if (v.system !== 'all' && q.system !== v.system) return false;
+      if (v.filter === 'wrong') return q.mine !== q.key;
+      if (v.filter === 'flag') return q.flag;
+      return true;
+    });
+    var chips = [['all', 'Semua'], ['wrong', 'Salah / kosong'], ['flag', 'Ragu-ragu']].map(function (f) {
+      return '<button type="button" class="btn btn-sm' + (v.filter === f[0] ? ' btn-primary' : '') + '" data-act="rv-filter" data-v="' + f[0] + '">' + f[1] + '</button>';
+    }).join('');
+    var sysSel = systems.length > 1 ? '<select class="input" data-change="rv-sys" style="max-width:260px"><option value="all">Semua sistem</option>' + systems.map(function (x) {
+      return '<option value="' + esc(x) + '"' + (v.system === x ? ' selected' : '') + '>' + esc(x) + '</option>';
+    }).join('') + '</select>' : '';
+    var cards = list.map(function (q) {
+      var img = safeImg(q.image);
+      var st = q.mine == null ? '<span class="badge b-warn">Tidak dijawab</span>' : (q.mine === q.key ? '<span class="badge b-ok">Benar</span>' : '<span class="badge b-bad">Salah</span>');
+      var opts = q.options.map(function (t, i) {
+        var L = letters[i], cls = '', tag = '';
+        if (L === q.key) { cls = 'key'; tag = q.mine === q.key ? 'Kunci (jawabanmu)' : 'Kunci'; }
+        else if (L === q.mine) { cls = 'wrong'; tag = 'Jawabanmu'; }
+        return '<button type="button" class="opt ' + cls + '" disabled><span class="l">' + L + '</span><span class="t">' + esc(t) + '</span>' + (tag ? '<span class="tag">' + tag + '</span>' : '') + '</button>';
+      }).join('');
+      return '<div class="qcard" style="margin-bottom:14px"><div class="row row-c"><span class="chip">' + esc(q.system) + '</span><span class="small bold muted">Soal ' + q.no + '</span>' + st + (q.flag ? '<span class="badge b-warn">Ragu-ragu</span>' : '') + '</div>' +
+        '<p class="stem">' + esc(q.stem) + '</p>' + (img ? '<img class="qimg" src="' + img + '" alt="Gambar pada soal">' : '') + '<div class="opts">' + opts + '</div></div>';
+    }).join('');
+    setMain('<div class="row row-c between"><div class="col" style="gap:4px"><span class="page-sub">' + esc(v.title) + '</span><h1 class="page-title">Tinjau semua soal</h1></div>' +
+      '<a class="btn" href="#/hasil/' + v.id + '">Kembali ke hasil</a></div>' +
+      '<div class="row row-c" style="gap:8px">' + chips + sysSel + '<span class="small muted">' + list.length + ' dari ' + v.qs.length + ' soal</span></div>' +
+      (cards || '<p class="muted">Tidak ada soal untuk filter ini.</p>') + '<p class="small muted">Tidak ada pembahasan: hanya soal, kunci, dan jawabanmu.</p>');
+  }
+  H['rv-filter'] = function (el) { S.rv.filter = el.dataset.v; renderReview(); };
+  H['rv-sys'] = function (el) { S.rv.system = el.value; renderReview(); };
 
   /* ---------- peringkat ---------- */
   async function rankView(which) {
@@ -619,6 +759,7 @@
     switch (r.name) {
       case 'ujian': return examView(r.a);
       case 'hasil': return resultView(r.a);
+      case 'tinjau': return reviewView(r.a);
       case 'peringkat': return rankView(r.a);
       case 'profil': return profileView();
       case 'admin':
