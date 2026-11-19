@@ -62,15 +62,16 @@
       '<div class="row"><div class="field grow" style="flex:1 1 150px"><label for="jml">Jumlah soal</label><input id="jml" name="count" class="input" type="number" min="1" max="500" value="' + def + '" required></div>' +
       '<div class="field grow" style="flex:1 1 150px"><label for="tmr">Timer (menit, kosong = tanpa timer)</label><input id="tmr" name="timer" class="input" type="number" min="1" max="600" placeholder="tanpa timer"></div></div>' +
       '<div class="col" style="gap:8px"><span class="label">Kapan benar/salah dan kunci ditampilkan</span><div class="seg">' +
-      [['each', 'Per nomor'], ['10', 'Per 10'], ['20', 'Per 20'], ['end', 'Di akhir']].map(function (f) {
+      [['each', 'Per nomor'], ['10', 'Per 10'], ['20', 'Per 20'], ['custom', 'Atur sendiri'], ['end', 'Di akhir']].map(function (f) {
         return '<label class="' + (f[0] === 'end' ? 'on' : '') + '"><input type="radio" name="fb" value="' + f[0] + '"' + (f[0] === 'end' ? ' checked' : '') + ' data-change="fb-pick">' + f[1] + '</label>';
-      }).join('') + '</div></div>' +
+      }).join('') + '</div>' +
+      '<div class="field" id="fbn-wrap" style="display:none"><label for="fbn">Tampilkan kunci setiap berapa nomor?</label><input id="fbn" name="fbn" class="input" type="number" min="1" max="500" placeholder="contoh: 5" style="max-width:180px"></div></div>' +
       '<button class="btn btn-primary" style="height:50px" type="submit"' + (avail.length ? '' : ' disabled') + '>Buat sesi dan acak soal</button>' +
       '<p class="small muted">Soal diacak satu kali saat sesi dibuat, jadi semua peserta mendapat set yang sama.</p></form>' +
       '<div class="card grow" style="flex:1 1 460px"><h2 class="bold" style="font-size:20px">Daftar sesi</h2>' +
       (ST.sessions.length ? '<div class="scroll-x"><table class="table"><thead><tr><th>Sesi</th><th>Soal</th><th>Selesai</th><th>Status</th><th>Aksi</th></tr></thead><tbody>' +
         ST.sessions.map(function (s) {
-          return '<tr><td><span class="bold">' + esc(s.title) + '</span><div class="small muted">' + (s.timer_minutes ? s.timer_minutes + ' menit' : 'tanpa timer') + ' · ' + esc(A.FB_LABEL[s.feedback_mode]) + '</div></td>' +
+          return '<tr><td><span class="bold">' + esc(s.title) + '</span><div class="small muted">' + (s.timer_minutes ? s.timer_minutes + ' menit' : 'tanpa timer') + ' · ' + esc(A.fbLabel(s.feedback_mode)) + '</div></td>' +
             '<td>' + s.total + '</td><td>' + s.finished + (s.ongoing ? ' <span class="small muted">(+' + s.ongoing + ' berjalan)</span>' : '') + '</td>' +
             '<td>' + (s.status === 'open' ? '<span class="badge b-info">Terbuka</span>' : '<span class="badge b-bad">Ditutup</span>') + '</td>' +
             '<td><div class="row" style="gap:8px"><button class="btn btn-sm" type="button" data-act="sess-toggle" data-v="' + s.id + '" data-s="' + s.status + '">' + (s.status === 'open' ? 'Tutup' : 'Buka') + '</button>' +
@@ -88,16 +89,23 @@
   };
   H['fb-pick'] = function (el) {
     el.closest('.seg').querySelectorAll('label').forEach(function (l) { l.classList.toggle('on', l.contains(el)); });
+    var w = document.getElementById('fbn-wrap'); if (w) w.style.display = el.value === 'custom' ? '' : 'none';
   };
   H['create-session'] = async function (form) {
     var banks = Array.prototype.map.call(form.querySelectorAll('input[name=bank]:checked'), function (c) { return c.value; });
     var timer = form.elements.timer.value.trim();
     var btn = form.querySelector('button[type=submit]');
+    var fb = form.elements.fb.value, cnt = parseInt(form.elements.count.value, 10);
+    if (fb === 'custom') {
+      var nn = parseInt(form.elements.fbn.value, 10);
+      if (!nn || nn < 1 || nn > cnt) { A.toast('Isi angka 1 sampai ' + cnt + ' untuk "tiap berapa nomor".', true); return; }
+      fb = String(nn);
+    }
     btn.disabled = true;
     try {
       await Api.call('adm_create_session', {
         p_title: form.elements.title.value, p_bank_ids: banks, p_count: parseInt(form.elements.count.value, 10),
-        p_timer: timer ? parseInt(timer, 10) : null, p_feedback: form.elements.fb.value
+        p_timer: timer ? parseInt(timer, 10) : null, p_feedback: fb
       });
       A.toast('Sesi dibuat. Peserta bisa langsung mengerjakan.');
       sesiTab();
