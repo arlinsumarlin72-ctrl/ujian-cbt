@@ -9,6 +9,7 @@
 
   var AVATARS = ['#0E6A73', '#2F6DA8', '#7A4E9C', '#A5551C', '#B13A5F', '#5E7A1F', '#4A5A66', '#8A6A00'];
   var FB_LABEL = { each: 'Kunci tampil per nomor', '10': 'Kunci tampil tiap 10 soal', '20': 'Kunci tampil tiap 20 soal', end: 'Kunci tampil di akhir' };
+  function fbLabel(m) { return FB_LABEL[m] || (/^\d+$/.test(m || '') ? 'Kunci tampil tiap ' + (+m) + ' soal' : ''); }
 
   /* ---------- utilitas ---------- */
   function esc(s) {
@@ -193,7 +194,7 @@
       : s.started ? '<span class="badge b-warn">Sedang dikerjakan</span>'
       : s.status === 'open' ? '<span class="badge b-info">Terbuka</span>' : '<span class="badge b-bad">Ditutup</span>';
     return '<div class="session"><div><h3>' + esc(s.title) + '</h3><div class="meta"><span>' + s.total + ' soal</span><span>' +
-      (s.timer_minutes ? s.timer_minutes + ' menit' : 'Tanpa timer') + '</span><span>' + esc(FB_LABEL[s.feedback_mode] || '') +
+      (s.timer_minutes ? s.timer_minutes + ' menit' : 'Tanpa timer') + '</span><span>' + esc(fbLabel(s.feedback_mode)) +
       '</span><span>' + s.finished + ' peserta selesai</span></div></div><div class="row row-c">' + badge + action + '</div></div>';
   }
 
@@ -252,7 +253,7 @@
 
   function blockInfo(E, idx) {
     var m = E.session.feedback_mode;
-    if (m !== '10' && m !== '20') return null;
+    if (!/^\d+$/.test(m || '')) return null;
     var n = +m, total = E.qs.length, s = Math.floor(idx / n) * n, e = Math.min(s + n, total) - 1;
     var left = 0;
     for (var i = s; i <= e; i++) if (!E.answers[E.qs[i].id]) left++;
@@ -319,7 +320,7 @@
       '<span><i style="background:#fff;border:1px solid var(--field)"></i>Belum dijawab</span>' +
       '<span><i style="background:#fff;border:3px solid var(--ink)"></i>Soal saat ini</span>' +
       (E.session.feedback_mode !== 'end' ? '<span><i style="background:#fff;border:1px solid var(--field);box-shadow:inset 0 -4px 0 #1C7C4D"></i>Garis hijau: benar</span><span><i style="background:#fff;border:1px solid var(--field);box-shadow:inset 0 -4px 0 #B3261E"></i>Garis merah: salah</span>' : '') +
-      '</div><p class="small muted">' + esc(FB_LABEL[E.session.feedback_mode] || '') + '. Jawaban tersimpan otomatis.</p></aside></div>';
+      '</div><p class="small muted">' + esc(fbLabel(E.session.feedback_mode)) + '. Jawaban tersimpan otomatis.</p></aside></div>';
     tickTimer();
   }
 
@@ -614,6 +615,6 @@
   window.App = {
     start: start, H: H, S: S, esc: esc, pad: pad, clock: clock, pct: pct, avatar: avatar, toast: toast, go: go,
     shell: shell, setMain: setMain, guard: guard, errorCard: errorCard, dialog: dialog, confirmDialog: confirmDialog,
-    promptDialog: promptDialog, route: route, fresh: fresh, FB_LABEL: FB_LABEL, onCleanup: onCleanup
+    promptDialog: promptDialog, route: route, fresh: fresh, FB_LABEL: FB_LABEL, fbLabel: fbLabel, onCleanup: onCleanup
   };
 })();
