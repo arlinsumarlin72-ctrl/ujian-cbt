@@ -7,6 +7,7 @@
   var H = {};          // penangan klik/submit/change, berdasarkan nama
   var cleanups = [];   // fungsi pembersih saat pindah halaman
 
+  var EMOJIS = ['😀', '😎', '🤓', '🧠', '🩺', '💉', '🫀', '🦷', '🐱', '🦊', '🌟', '🔥'];
   var AVATARS = ['#0E6A73', '#2F6DA8', '#7A4E9C', '#A5551C', '#B13A5F', '#5E7A1F', '#4A5A66', '#8A6A00'];
   var FB_LABEL = { each: 'Kunci tampil per nomor', '10': 'Kunci tampil tiap 10 soal', '20': 'Kunci tampil tiap 20 soal', end: 'Kunci tampil di akhir' };
   function fbLabel(m) { if (FB_LABEL[m]) return FB_LABEL[m]; var x = /^([0-9]+)(s?)$/.exec(m || ''); return x ? 'Kunci tampil tiap ' + (+x[1]) + ' soal, ' + (x[2] ? 'dibuka satu per satu' : 'sekaligus') : ''; }
@@ -45,8 +46,16 @@
   }
   function pct(a, b) { return b ? Math.round((a / b) * 100) : 0; }
   function initial(name) { return esc(String(name || '?').trim().charAt(0).toUpperCase()); }
+  function avParts(v) {
+    var s = String(v || ''), i = s.indexOf('|');
+    return { color: /^#[0-9A-Fa-f]{6}$/.test(i < 0 ? s : s.slice(0, i)) ? (i < 0 ? s : s.slice(0, i)) : '#0E6A73', extra: i < 0 ? '' : s.slice(i + 1) };
+  }
   function avatar(name, color, cls) {
-    return '<span class="avatar ' + (cls || '') + '" style="background:' + esc(color || '#0E6A73') + '" aria-hidden="true">' + initial(name) + '</span>';
+    var p = avParts(color), inner;
+    if (/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(p.extra)) inner = '<img src="' + p.extra + '" alt="" style="width:100%;height:100%;border-radius:999px;object-fit:cover;display:block">';
+    else if (p.extra) inner = '<span style="font-size:1.25em;line-height:1">' + esc(p.extra) + '</span>';
+    else inner = initial(name);
+    return '<span class="avatar ' + (cls || '') + '" style="background:' + esc(p.color) + ';overflow:hidden" aria-hidden="true">' + inner + '</span>';
   }
   function safeImg(src) { return typeof src === 'string' && /^data:image\/(png|jpe?g|gif|webp);base64,/.test(src) ? src : null; }
   function fresh() { var n = S.rt; return function () { return S.rt === n; }; }
@@ -714,8 +723,14 @@
         '<div class="card"><div class="row row-c" style="gap:16px;flex-wrap:nowrap">' + avatar(me.name, me.avatar_color, 'avatar-lg') +
         '<div class="col" style="gap:2px"><span class="bold" style="font-size:20px">' + esc(me.name) + '</span><span class="small muted">' + (me.role === 'admin' ? 'Admin' : 'Peserta') + '</span></div></div>' +
         '<div class="col" style="gap:8px"><span class="small bold">Warna avatar</span><div class="swatches">' + AVATARS.map(function (c) {
-          return '<button type="button" class="swatch' + (c === me.avatar_color ? ' on' : '') + '" style="background:' + c + '" data-act="avatar" data-v="' + c + '" aria-label="Pilih warna ' + c + '" aria-pressed="' + (c === me.avatar_color) + '"></button>';
+          return '<button type="button" class="swatch' + (c === avParts(me.avatar_color).color ? ' on' : '') + '" style="background:' + c + '" data-act="avatar" data-v="' + c + '" aria-label="Pilih warna ' + c + '" aria-pressed="' + (c === avParts(me.avatar_color).color) + '"></button>';
         }).join('') + '</div></div>' +
+        '<div class="col" style="gap:8px"><span class="small bold">Foto atau emoji</span><div class="row" style="gap:6px">' + EMOJIS.map(function (m) {
+          return '<button type="button" class="btn btn-sm" style="font-size:20px;padding:4px 10px" data-act="avatar-emoji" data-v="' + m + '" aria-label="Pakai emoji ' + m + '">' + m + '</button>';
+        }).join('') + '</div><div class="row" style="gap:8px"><label class="btn btn-sm" style="cursor:pointer">Unggah foto<input type="file" accept="image/*" data-change="avatar-photo" style="display:none"></label>' +
+        (avParts(me.avatar_color).extra ? '<button type="button" class="btn btn-sm" data-act="avatar-clear">Kembali ke huruf</button>' : '') + '</div></div>' +
+        '<form class="col" style="gap:8px" data-submit="rename"><span class="small bold">Ganti nama</span><div class="row" style="gap:8px;flex-wrap:nowrap"><input class="input" name="nama" maxlength="40" value="' + esc(me.name) + '" aria-label="Nama baru"><button class="btn btn-sm btn-primary" type="submit">Simpan</button></div></form>' +
+        '<form class="col" style="gap:8px" data-submit="repin"><span class="small bold">Ganti PIN</span><input class="input" name="lama" type="password" inputmode="numeric" maxlength="6" placeholder="PIN lama" autocomplete="current-password"><input class="input" name="baru" type="password" inputmode="numeric" maxlength="6" placeholder="PIN baru (4 sampai 6 angka)" autocomplete="new-password"><button class="btn btn-sm btn-primary" type="submit">Ganti PIN</button></form>' +
         '<div class="row" style="gap:12px"><div class="stat" style="padding:16px;background:var(--bg);border:0"><span class="small muted">Sesi diikuti</span><b style="font-size:26px">' + hist.length + '</b></div>' +
         '<div class="stat" style="padding:16px;background:var(--bg);border:0"><span class="small muted">Akurasi rata-rata</span><b style="font-size:26px">' + pct(sumS, sumT) + '%</b></div></div>' +
         '<div class="row" style="gap:12px"><div class="stat" style="padding:16px;background:var(--bg);border:0"><span class="small muted">Bidang terkuat</span><span class="bold">' + (best ? esc(best.bank) + ' (' + pct(best.correct, best.total) + '%)' : '-') + '</span></div>' +
@@ -731,9 +746,41 @@
         }).join('') : '<p class="muted small">Belum ada data.</p>') + '</div></div>');
     });
   }
-  H.avatar = async function (el) {
-    try { S.me = await Api.call('app_set_avatar', { p_color: el.dataset.v }); profileView(); }
+  async function setAvatar(color, extra) {
+    try { S.me = await Api.call('app_set_avatar', { p_color: color + (extra ? '|' + extra : '') }); toast('Profil diperbarui.'); profileView(); }
     catch (e) { toast(e.message, true); }
+  }
+  H.avatar = function (el) { return setAvatar(el.dataset.v, avParts(S.me.avatar_color).extra); };
+  H['avatar-emoji'] = function (el) { return setAvatar(avParts(S.me.avatar_color).color, el.dataset.v); };
+  H['avatar-clear'] = function () { return setAvatar(avParts(S.me.avatar_color).color, ''); };
+  H['avatar-photo'] = function (el) {
+    var f = el.files && el.files[0]; if (!f) return;
+    if (!/^image\//.test(f.type)) { toast('Pilih file gambar.', true); return; }
+    var rd = new FileReader();
+    rd.onload = function () {
+      var img = new Image();
+      img.onload = function () {
+        var n = 112, c = document.createElement('canvas'); c.width = n; c.height = n;
+        var side = Math.min(img.width, img.height), sx = (img.width - side) / 2, sy = (img.height - side) / 2;
+        var g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, n, n); g.drawImage(img, sx, sy, side, side, 0, 0, n, n);
+        var url = c.toDataURL('image/jpeg', 0.75);
+        setAvatar(avParts(S.me.avatar_color).color, url);
+      };
+      img.onerror = function () { toast('Gambar tidak bisa dibaca.', true); };
+      img.src = rd.result;
+    };
+    rd.readAsDataURL(f);
+    el.value = '';
+  };
+  H.rename = async function (f, e) {
+    if (e && e.preventDefault) e.preventDefault();
+    try { S.me = await Api.call('app_update_name', { p_name: f.elements.nama.value }); toast('Nama diganti.'); profileView(); }
+    catch (er) { toast(er.message, true); }
+  };
+  H.repin = async function (f, e) {
+    if (e && e.preventDefault) e.preventDefault();
+    try { await Api.call('app_change_pin', { p_old: f.elements.lama.value, p_new: f.elements.baru.value }); f.reset(); toast('PIN diganti. Pakai PIN baru saat masuk berikutnya.'); }
+    catch (er) { toast(er.message, true); }
   };
 
   /* ---------- router ---------- */
