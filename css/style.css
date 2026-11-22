@@ -311,8 +311,32 @@ h1, h2, h3, p { margin: 0; }
 .dclock.over { color: #B3261E; }
 .nav-n.spot { box-shadow: 0 0 0 2px #fff, 0 0 0 4px #7A4E9C; }
 .nav-n.spot.cur { box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--ink), 0 0 0 6px #7A4E9C; }
-.exam-side.min { flex: 0 0 auto; max-width: none; position: static; max-height: none; padding: 10px 12px; align-self: flex-start; flex-direction: row; align-items: center; gap: 10px; }
 .admin-bar.min { padding-top: 4px; padding-bottom: 4px; }
+
+
+/* ---------- sorotan, suara ulang, pembahasan bersama, mode ketat ---------- */
+.spotbar { background: #F4ECFA; color: #4A2A66; border-bottom: 1px solid #D9C2EA; padding: 8px 40px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 14px; }
+.spotnav { background: #F4ECFA; color: #4A2A66; border: 1px solid #D9C2EA; border-radius: 12px; padding: 8px 10px; font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.nav-n.spot::before { content: ''; position: absolute; top: -6px; left: -6px; width: 13px; height: 13px; border-radius: 999px; background: #7A4E9C; border: 2px solid #fff; animation: pulse 1.6s infinite; z-index: 2; }
+.dktools { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+.dklist { max-height: 62vh; }
+.rvres { border: 1px solid #D9C2EA; background: #FBF7FE; border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.rvrow { display: grid; grid-template-columns: 34px 1fr 62px; align-items: center; gap: 8px; }
+.rvrow.key b { color: var(--ok); }
+.rvbars { display: flex; flex-direction: column; gap: 3px; }
+.rvb { display: block; height: 7px; border-radius: 999px; min-width: 2px; }
+.rvb.a, .rvk.a { background: #9DB8BE; } .rvb.b, .rvk.b { background: #7A4E9C; }
+.rvk { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin: 0 4px 0 8px; vertical-align: -1px; }
+.expl.empty { border-left-color: var(--field); background: var(--bg); }
+.expl.editing { display: flex; flex-direction: column; gap: 8px; border-left-color: #B8860B; background: #FFFBEA; }
+.expl.editing textarea { height: auto; padding: 10px 12px; resize: vertical; line-height: 1.5; }
+.exfigs, .exthumbs { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.exfig { max-width: 100%; max-height: 260px; border-radius: 10px; border: 1px solid var(--line); background: #fff; }
+.exth { position: relative; display: inline-block; }
+.exth img { height: 84px; border-radius: 8px; border: 1px solid var(--line); display: block; }
+.exth button { position: absolute; top: -8px; right: -8px; width: 22px; height: 22px; border-radius: 999px; border: 2px solid #fff; background: #B3261E; color: #fff; font-weight: 800; line-height: 1; cursor: pointer; padding: 0; }
+.takeover { z-index: 120; background: rgba(18, 48, 58, .94); }
+@media print { .strict { display: none !important; } body::before { content: 'Pencetakan dinonaktifkan pada mode ketat.'; display: block; padding: 24px; font-size: 18px; } }
 
 /* ---------- modal & toast ---------- */
 .overlay { position: fixed; inset: 0; background: rgba(18, 48, 58, .5); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 50; }
@@ -335,7 +359,7 @@ h1, h2, h3, p { margin: 0; }
   .qcard { padding: 18px; }
   .stem { font-size: 16px; }
   .exam-side { max-width: none; position: static; flex-basis: 100%; max-height: none; overflow: visible; }
-  .discuss-bar, .alert-bar, .part-bar, .admin-bar { padding: 8px 16px; }
+  .discuss-bar, .alert-bar, .part-bar, .admin-bar, .spotbar { padding: 8px 16px; }
   .nav-grid { grid-template-columns: repeat(auto-fill, minmax(40px, 1fr)); gap: 6px; }
   .nav-n { height: 40px; font-size: 14px; }
   .nav-n.sm { height: 26px; width: 26px; font-size: 11px; }

@@ -161,7 +161,7 @@
     if (sec < 90) return sec + ' detik lalu';
     return Math.round(sec / 60) + ' menit lalu';
   }
-  var KIND = { tab: 'Pindah tab / aplikasi', blur: 'Jendela kehilangan fokus', fullscreen: 'Keluar layar penuh' };
+  var KIND = { tab: 'Pindah tab / aplikasi', blur: 'Jendela kehilangan fokus', fullscreen: 'Keluar layar penuh', navigasi: 'Mencoba keluar layar ujian (tombol Kembali/ubah alamat)', muat_ulang: 'Halaman dimuat ulang / dibuka lagi', senyap: 'Tidak ada detak dari layar ujian (dicatat server)', perangkat_ganda: 'Akun dibuka di tab/perangkat lain', devtools: 'Ukuran jendela tidak wajar (kemungkinan developer tools)' };
   function flowHtml() {
     var f = ST.flow; if (!f) return '';
     var n = f.block, parts = n ? Math.ceil(f.total / n) : 0, locked = f.lock_mode === 'locked' && n;
@@ -179,7 +179,7 @@
       btns += '<button class="btn btn-sm' + (hasNext ? '' : ' btn-primary') + '" type="button" data-act="flow" data-a="end" data-u="0">Selesai diskusi</button>';
       if (hasNext) btns += '<button class="btn btn-sm btn-primary" type="button" data-act="flow" data-a="end" data-u="1">Selesai diskusi dan buka bagian ' + nextNo + ' (soal ' + nextA + '-' + nextB + ')</button>';
     }
-    return '<div class="flowbox' + (f.discussing ? ' live' : '') + '"><div class="row row-c between" style="gap:12px"><div class="col" style="gap:2px"><span class="bold">' + (f.discussing ? 'Diskusi sedang berlangsung' + (f.plan ? ' (target ' + A.clock(f.plan) + ')' : '') + '. Waktu peserta dihentikan.' : 'Kendali sesi') + '</span><span class="small muted">' + info + (f.spot ? ' · Sorotan: soal ' + f.spot.no + (f.spot.explainer ? ' (penjelas ' + esc(f.spot.explainer) + ')' : '') : '') + '</span></div>' +
+    return '<div class="flowbox' + (f.discussing ? ' live' : '') + '"><div class="row row-c between" style="gap:12px"><div class="col" style="gap:2px"><span class="bold">' + (f.discussing ? 'Diskusi sedang berlangsung' + (f.plan ? ' (target ' + A.clock(f.plan) + ')' : '') + '. Waktu peserta dihentikan.' : 'Kendali sesi') + '</span><span class="small muted">' + info + (f.spot ? ' · Sorotan: soal ' + f.spot.no : '') + (f.revote ? ' · Suara ulang soal ' + f.revote.no + (f.revote.open ? ' dibuka (' + f.revote.voted + ' dari ' + f.revote.eligible + ' memilih)' : ' selesai') : '') + '</span></div>' +
       (f.discussing ? '<span class="flowclock" id="flowclock">' + A.clock(f.since || 0) + '</span>' : '') + '</div>' +
       '<div class="row" style="gap:8px">' + btns + '</div>' +
       '<span class="small muted">Total diskusi ' + dur0(f.disc_secs) + ' dalam ' + f.disc_count + ' kali. Waktu diskusi tidak dihitung dalam waktu mengerjakan peserta.</span></div>';
@@ -189,7 +189,7 @@
   function recapHtml() {
     var f = ST.flow, rc = ST.recap; if (!f || !f.block) return '';
     var parts = Math.ceil(f.total / f.block);
-    if (!rc) return '<div class="flowbox"><span class="bold">Rekap bagian untuk diskusi</span><span class="small muted">Muncul setelah ada peserta yang menyelesaikan satu bagian (tombol Selesaikan blok).</span></div>';
+    if (!rc) return '<div class="flowbox"><span class="bold">Rekap bagian untuk diskusi</span><span class="small muted">' + (ST.recapErr ? esc(ST.recapErr) : 'Muncul setelah ada peserta yang menyelesaikan satu bagian (tombol Selesaikan blok).') + '</span></div>';
     var opts = ''; for (var i = 1; i <= parts; i++) opts += '<option value="' + i + '"' + (i === rc.block ? ' selected' : '') + '>Bagian ' + i + ' (soal ' + ((i - 1) * f.block + 1) + '-' + Math.min(i * f.block, f.total) + ')</option>';
     var rows = rc.qs.slice().sort(function (a, b) { return (A.pct(a.ok, a.n) - (a.hands || 0) * 12) - (A.pct(b.ok, b.n) - (b.hands || 0) * 12) || a.no - b.no; });
     var first = 0;
@@ -202,8 +202,8 @@
       }).join('');
       return '<div class="rrow"><span class="rk">' + q.no + '</span><div class="grow col" style="gap:4px"><div class="small"><b>' + esc(q.sy) + '</b> · ' + esc(q.ty) + ' · kunci <b>' + esc(q.key || '-') + '</b>' + (hot ? ' <span class="badge b-bad">Bahas dulu</span>' : '') + (q.hands ? ' <span class="badge b-warn">✋ ' + q.hands + ' minta dibahas</span>' : '') + (q.expl ? ' <span class="badge b-info">Ada pembahasan</span>' : '') + '</div>' +
         '<div class="small muted">' + esc(q.stem) + '</div><div class="dists">' + dist + '</div>' +
-        (q.ok_names && q.ok_names.length ? '<div class="small">Menjawab benar: <b>' + esc(q.ok_names.join(', ')) + '</b></div>' : '') + '</div>' +
-        '<div class="col" style="gap:4px"><button class="btn btn-sm" type="button" data-act="flow-spot" data-no="' + q.no + '">Sorot</button><button class="btn btn-sm" type="button" data-act="flow-spot" data-no="' + q.no + '" data-pick="1">Penjelas</button></div>' +
+'</div>' +
+        '<div class="col" style="gap:4px"><button class="btn btn-sm" type="button" data-act="flow-spot" data-no="' + q.no + '">Sorot</button></div>' +
         '<div class="pcb ' + lv(p) + '"><b>' + (q.n ? p + '%' : '-') + '</b><span>' + q.ok + '/' + q.n + '</span></div></div>';
     }).join('');
     return '<div class="flowbox"><div class="row row-c between" style="gap:10px"><span class="bold">Rekap untuk diskusi: soal terendah dulu</span><select class="input" data-change="recap-pick" style="max-width:240px;height:36px" aria-label="Pilih bagian">' + opts + '</select></div>' +
@@ -233,7 +233,8 @@
     var fl = r[1], parts = fl.block ? Math.ceil(fl.total / fl.block) : 0;
     var blk = ST.recapPick || (fl.block && fl.max_fin >= 1 ? Math.min(fl.max_fin, parts) : 0);
     ST.recap = null;
-    if (fl.block && blk >= 1) { try { ST.recap = await Api.call('adm_block_recap', { p_session: id, p_block: blk }); } catch (e) { ST.recap = null; } }
+    ST.recapErr = null;
+    if (fl.block && blk >= 1) { try { ST.recap = await Api.call('adm_block_recap', { p_session: id, p_block: blk }); } catch (e) { ST.recap = null; ST.recapErr = e.message; } }
   }
   async function pollPanel() {
     try {
@@ -267,8 +268,8 @@
   H['flow-spot'] = async function (el) {
     el.disabled = true;
     try {
-      var r = await Api.call('adm_flow', { p_session: ST.openSess, p_action: 'spot', p_no: +el.dataset.no, p_pick: el.dataset.pick === '1' });
-      A.toast('Soal ' + el.dataset.no + ' disorot di layar peserta' + (el.dataset.pick === '1' ? (r.explainer ? '. Penjelas: ' + r.explainer + '.' : '. Belum ada teman yang menjawab benar.') : '.'));
+      await Api.call('adm_flow', { p_session: ST.openSess, p_action: 'spot', p_no: +el.dataset.no });
+      A.toast('Soal ' + el.dataset.no + ' disorot di layar peserta.');
       await pollPanel();
     } catch (e) { A.toast(e.message, true); }
     el.disabled = false;

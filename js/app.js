@@ -239,6 +239,7 @@
   function lsSet(k, sid, v) { try { localStorage.setItem('cbt_' + k + '_' + sid, JSON.stringify(v)); } catch (e) { /* abaikan */ } }
   function lsDel(k, sid) { try { localStorage.removeItem('cbt_' + k + '_' + sid); } catch (e) { /* abaikan */ } }
 
+  var CID = Math.random().toString(36).slice(2) + Date.now().toString(36);   // id tab ini: hanya satu tab/perangkat aktif per sesi
   function cur() { return S.exam.qs[S.exam.idx]; }
   function fsEl() { return document.fullscreenElement || document.webkitFullscreenElement || null; }
   function fsSupported() { var d = document.documentElement; return !!(d.requestFullscreen || d.webkitRequestFullscreen); }
@@ -252,12 +253,22 @@
   function frozenClock(E) { return E.discussing || E.paused; }
   function elapsedNow(E) { return frozenClock(E) ? E.elapsed0 : E.elapsed0 + (Date.now() - E.t0) / 1000; }
   function noop() {}
+  function isDead(err) { return !!(err && err.code === 'P0409'); }
+  function onDead(E, err) {
+    if (!E || E.dead) return;
+    E.dead = true; clearTimeout(E.saveT);
+    var ov = document.createElement('div');
+    ov.className = 'overlay takeover'; ov.setAttribute('role', 'alertdialog');
+    ov.innerHTML = '<div class="modal"><h3>Sesi ini dibuka di tempat lain</h3><p class="muted">' + esc(err && err.message ? err.message : 'Akun ini sedang dipakai di tab atau perangkat lain.') + '</p><p class="small muted">Jawaban di layar ini tidak lagi disimpan. Tekan tombol di bawah untuk mengambil alih di sini (tab/perangkat lain akan berhenti).</p><div class="acts"><button class="btn btn-primary" type="button" data-act="takeover">Ambil alih di sini</button></div></div>';
+    root.appendChild(ov);
+  }
+  H.takeover = function () { route(); };
 
   async function examView(id) {
     root.innerHTML = '<div class="loading">Menyiapkan soal...</div>';
     var ok = fresh();
     var d;
-    try { d = await Api.call('app_start', { p_session: id }); }
+    try { d = await Api.call('app_start', { p_session: id, p_client: CID }); }
     catch (e) {
       if (e.code === '28000') { Api.setToken(null); S.me = null; return loginView(); }
       shell('home'); setMain(errorCard(e)); return;
@@ -272,7 +283,8 @@
       away: null, fsSeen: false, vchain: Promise.resolve(),
       times: d.times || {}, tdirty: false, notes: d.notes || {}, noteOpen: {}, peers: {}, warned: {},
       blk: d.blk, blk_start: d.blk_start, bp: d.bp || null, flow: null, flowAt: 0,
-      ui: { nav: uiGet('nav', true), adm: uiGet('adm', true), dk: uiGet('dk', true) },
+      ui: { nav: uiGet('nav', true), adm: uiGet('adm', true), dk: uiGet('dk', true), dksort: uiGet('dksort', 'no'), dkhide: uiGet('dkhide', false) },
+      ex: {}, exImg: {}, rv: d.revote || null, dead: false, revoteBusy: false, guardTs: 0,
       spot: d.spot || null, dplan: d.dplan || null, dsince0: d.dsince || 0, dt0: Date.now(), follow: true,
       rc: null, rcAt: 0, rcPick: null, rcBusy: false, dbeep: false, xplan: '',
       elim: lsGet('elim', id, {}), hl: lsGet('hl', id, {}), hlOn: false, saveFail: false, offline: false
@@ -372,6 +384,7 @@
       var v = res && res[q.id]; if (!v) return;
       var changed = !p || p.n !== v.n || p.ok !== v.ok || p.e !== v.e;
       E.peers[q.id] = Object.assign({ at: Date.now() }, v);
+      ensureExImages(E, q.id);
       if (changed && E.qs[E.idx] && E.qs[E.idx].id === q.id && !(document.activeElement && document.activeElement.tagName === 'TEXTAREA')) renderExam();
     }).catch(noop);
   }
@@ -387,16 +400,16 @@
     E.finBusy = true; renderExam();
     try {
       clearTimeout(E.saveT); E.dirty = false;
-      var r = await Api.call('app_finalize', { p_session: E.id, p_answers: E.answers, p_flags: E.flags, p_upto: nb.end + 1 });
+      var r = await Api.call('app_finalize', { p_session: E.id, p_answers: E.answers, p_flags: E.flags, p_upto: nb.end + 1, p_client: CID });
       E.locked = r.locked; E.blk = r.blk; E.blk_start = r.blk_start;
       flushTimes(E);
       E.notified = nb.start;
       E.finBusy = false;
       await refreshExam(null);
       toast('Blok ' + (nb.start + 1) + ' sampai ' + (nb.end + 1) + ' diselesaikan.');
-    } catch (err) { toast(err.message, true); }
+    } catch (err) { if (isDead(err)) onDead(E, err); else toast(err.message, true); }
     E.finBusy = false;
-    if (S.exam === E) { renderExam(); peersFor(E); }
+    if (S.exam === E && !E.dead) { renderExam(); peersFor(E); }
   };
   H['show-key'] = async function () {
     var E = S.exam; if (!E) return;
@@ -411,13 +424,16 @@
 
   /* Sinkronisasi berkala: soal diganti admin, diskusi, jeda, bagian dibuka, dikumpulkan admin */
   async function pollRev() {
-    var E = S.exam; if (!E || E.submitting || E.swapBusy) return;
+    var E = S.exam; if (!E || E.dead || E.submitting || E.swapBusy) return;
     var d;
-    try { d = await Api.call('app_rev', { p_session: E.id }); } catch (e) { return; }
+    try { d = await Api.call('app_rev', { p_session: E.id, p_client: CID }); } catch (e) { if (isDead(e)) onDead(E, e); return; }
     if (S.exam !== E || !d) return;
     if (d.submitted) { toast('Jawabanmu sudah dikumpulkan oleh admin.'); var sid = E.id; S.exam = null; go('#/hasil/' + sid); return; }
     if (d.elapsed != null) { E.elapsed0 = d.elapsed; E.t0 = Date.now(); }
-    var changed = false, spotNew = false;
+    var changed = false, spotNew = false, rvNew = false;
+    var rvOld = E.rv; E.rv = d.revote || null;
+    if (E.rv && (!rvOld || rvOld.seq !== E.rv.seq)) rvNew = true;
+    else if ((rvOld ? rvOld.open + ':' + rvOld.seq : '') !== (E.rv ? E.rv.open + ':' + E.rv.seq : '')) changed = true;
     E.dplan = d.dplan || null; E.dsince0 = d.dsince || 0; E.dt0 = Date.now();
     if (d.spot && (!E.spot || d.spot.seq !== E.spot.seq)) { E.spot = d.spot; spotNew = true; }
     else if (!d.spot && E.spot) { E.spot = null; changed = true; }
@@ -443,8 +459,8 @@
     if (!!d.paused !== E.paused) { E.paused = !!d.paused; changed = true; }
     if (d.lock_mode === 'locked' && d.unlocked_n !== E.session.unlocked_n) { await refreshExam('Bagian berikutnya sudah dibuka admin.', true); return; }
     if (d.rev !== E.session.rev) { await refreshExam(d.notice || 'Ada soal yang diganti oleh admin.'); return; }
-    if (changed || spotNew) {
-      if (spotNew) onSpot(E); else { renderExam(); awayCheck(); }
+    if (changed || spotNew || rvNew) {
+      if (rvNew) onRevote(E); else if (spotNew) onSpot(E); else { renderExam(); awayCheck(); }
       loadRecap(E, E.rcPick);
     } else {
       updateBars(E);
@@ -456,14 +472,14 @@
     var E = S.exam; if (!E) return;
     if (E.dirty) await flushSave();
     var d;
-    try { d = await Api.call('app_start', { p_session: E.id }); } catch (e) { return; }
+    try { d = await Api.call('app_start', { p_session: E.id, p_client: CID }); } catch (e) { if (isDead(e)) onDead(E, e); return; }
     if (S.exam !== E || !d) return;
     if (d.submitted) { var sid2 = E.id; S.exam = null; go('#/hasil/' + sid2); return; }
     clearTimeout(E.saveT); E.dirty = false;
     E.session = d.session; E.discussing = !!d.session.discussing; E.paused = !!d.paused;
     E.elapsed0 = d.elapsed || 0; E.t0 = Date.now(); E.viol = d.viol || E.viol;
     E.blk = d.blk; E.blk_start = d.blk_start; E.bp = d.bp || null;
-    E.spot = d.spot || null; E.dplan = d.dplan || null; E.dsince0 = d.dsince || 0; E.dt0 = Date.now();
+    E.rv = d.revote || null; E.spot = d.spot || null; E.dplan = d.dplan || null; E.dsince0 = d.dsince || 0; E.dt0 = Date.now();
     E.qs = d.questions; E.answers = d.answers || {}; E.flags = d.flags || {}; E.keys = {}; E.locked = d.locked || 0; E.revealed = d.revealed || [];
     E.notes = Object.assign({}, d.notes || {}, E.notes); E.peers = {};
     if (E.idx > E.qs.length - 1) E.idx = E.qs.length - 1;
@@ -608,7 +624,8 @@
       '<span><i class="nav-n flag sm">3</i>Belum, ada bendera</span><span><i class="nav-n ans flag sm">4</i>Dijawab, ada bendera</span>' +
       (hasKeys ? '<span><i class="nav-n right sm">5</i>Benar</span><span><i class="nav-n miss sm">6</i>Salah</span>' : '') +
       (hasLock ? '<span><i class="nav-n lk sm">7</i>Terkunci</span>' : '') + '</div>';
-    return '<div class="nav-stats" role="group" aria-label="Ringkasan jawaban">' +
+    return (E.spot ? '<div class="spotnav">📣 Sedang dibahas: <b>soal ' + E.spot.no + '</b> <button class="btn btn-sm" type="button" data-act="dk-go" data-v="' + E.spot.no + '">Ke soal ' + E.spot.no + '</button></div>' : '') +
+      '<div class="nav-stats" role="group" aria-label="Ringkasan jawaban">' +
       stat('ans', 's-ans', nAns, 'Dijawab', '') + stat('flag', 's-flag', nFlag, 'Bendera', '<svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M5 21V3.5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" fill="none"/><path d="M5 4h13l-3 4.5 3 4.5H5z" fill="currentColor"/></svg> ') +
       stat('un', 's-un', nUn, 'Belum', '') + '</div>' +
       (f ? '<p class="small muted" style="margin-top:-6px">Nomor lain diredupkan. Klik lagi untuk menampilkan semua.</p>' : '') +
@@ -669,10 +686,11 @@
     }
     return '<span class="bold">Kendali admin</span><span class="small">' + (f.discussing ? 'Diskusi berlangsung <b id="xclock">' + clock((f.since || 0) + (Date.now() - E.flowAt) / 1000) + '</b>' + (f.plan ? ' (target ' + clock(f.plan) + ')' : '') + ', waktu semua peserta berhenti' : 'Tidak sedang diskusi') +
       (locked ? ' · bagian terbuka: ' + Math.min(Math.ceil(f.unlocked_n / n), Math.ceil(f.total / n)) + ' dari ' + Math.ceil(f.total / n) : '') + '</span>' + btns +
-      '<a class="btn btn-sm" href="#/admin/sesi">Panel peserta</a><button class="btn btn-sm" type="button" data-act="adm-toggle" title="Sembunyikan bilah ini">Sembunyikan</button>';
+      '<button class="btn btn-sm" type="button" data-act="adm-toggle" title="Sembunyikan bilah ini">Sembunyikan</button>';
   }
   function updateBars(E) {
     var p = document.getElementById('partbar'); if (p) { var t = partInner(E); p.innerHTML = t; p.classList.toggle('hidden', !t); }
+    var sb = document.getElementById('spotbar'); if (sb) { var st = spotbarInner(E); sb.innerHTML = st; sb.classList.toggle('hidden', !st); }
     var a = document.getElementById('adminbar');
     if (a) {
       var ae = document.activeElement;
@@ -699,7 +717,7 @@
     } catch (e) { toast(e.message, true); el.disabled = false; }
   };
 
-  /* ---------- bantuan diskusi: urutan bahas, "mau dibahas", sorotan admin, penjelas, pembahasan kelompok ---------- */
+  /* ---------- bantuan diskusi: urutan bahas, "mau dibahas", sorotan admin, suara ulang, pembahasan bersama ---------- */
   function dkAvailable(E) {
     return E.session.kind !== 'latihan' && modeInfo(E.session.feedback_mode).kind === 'block' && !!(E.locked > 0 || E.discussing || E.spot);
   }
@@ -720,7 +738,7 @@
     }
   }
   function loadRecap(E, blk) {
-    if (!E || E.rcBusy || !dkAvailable(E)) return Promise.resolve();
+    if (!E || E.dead || E.rcBusy || !dkAvailable(E)) return Promise.resolve();
     E.rcBusy = true;
     return Api.call('app_block_recap', { p_session: E.id, p_block: blk || null }).then(function (r) {
       E.rcBusy = false;
@@ -729,57 +747,109 @@
       updateDk(E);
     }).catch(function () { E.rcBusy = false; E.rcAt = Date.now(); });
   }
-  function updateDk(E) {
+  function updateDk(E, force) {
     var el = document.getElementById('dkwrap'); if (!el) return;
     var ae = document.activeElement;
-    if (ae && el.contains(ae) && (ae.tagName === 'SELECT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT')) return;
+    if (!force && ae && el.contains(ae) && (ae.tagName === 'SELECT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT')) return;
     el.innerHTML = dkHtml(E);
+  }
+  function qAccessible(E, no) { var q = E.qs[no - 1]; return !!(q && !q.locked && (no - 1 < E.locked || E.keys[q.id])); }
+  /* suara ulang terbuka untuk soal ini dan peserta sudah berhak ikut (kunci soal sudah terbuka baginya) */
+  function rvActive(E, q) {
+    return !!(E.rv && E.rv.open && q && !q.locked && E.rv.no === q.no && qAccessible(E, q.no));
+  }
+  function jumpTo(E, no) {
+    var q = E.qs[no - 1]; if (!q || q.locked) return false;
+    E.idx = no - 1; E.panel = false; renderExam(); window.scrollTo(0, 0); peersFor(E); return true;
   }
   function onSpot(E) {
     var sp = E.spot; if (!sp) return;
     beep();
-    var i = sp.no - 1, q = E.qs[i], open = !!(q && !q.locked && (i < E.locked || E.keys[q.id]));
-    toast('Admin membahas soal ' + sp.no + (sp.explainer ? '. Giliran menjelaskan: ' + sp.explainer + '.' : '.'));
-    if (E.follow && open) { E.idx = i; E.panel = false; renderExam(); window.scrollTo(0, 0); peersFor(E); }
-    else renderExam();
+    toast('Admin membahas soal ' + sp.no + '.');
+    if (E.follow && qAccessible(E, sp.no)) jumpTo(E, sp.no); else renderExam();
+  }
+  function onRevote(E) {
+    var rv = E.rv; if (!rv || !rv.open) { renderExam(); return; }
+    beep();
+    toast('Suara ulang dibuka untuk soal ' + rv.no + (qAccessible(E, rv.no) ? '. Pilih jawabanmu.' : '. Selesaikan bagiannya dulu untuk ikut.'));
+    if (E.follow && qAccessible(E, rv.no)) jumpTo(E, rv.no); else renderExam();
+  }
+  function rvResultHtml(E) {
+    var rv = E.rv; if (!rv || rv.open || !rv.res || !rv.res.n) return '';
+    var r = rv.res, L = ['A', 'B', 'C', 'D', 'E'], q = E.qs[rv.no - 1], no = q && q.options ? q.options.length : 5;
+    var rows = L.slice(0, no).map(function (l) {
+      var a = (r.init || {})[l] || 0, b = (r.vote || {})[l] || 0, isKey = l === r.key;
+      return '<div class="rvrow' + (isKey ? ' key' : '') + '"><b>' + l + (isKey ? ' ✓' : '') + '</b><div class="rvbars"><span class="rvb a" style="width:' + pct(a, r.n) + '%"></span><span class="rvb b" style="width:' + pct(b, r.n) + '%"></span></div><span class="small">' + a + ' → ' + b + '</span></div>';
+    }).join('');
+    var okB = (r.init || {})[r.key] || 0, okA = (r.vote || {})[r.key] || 0;
+    return '<div class="rvres"><b>Hasil suara ulang · soal ' + rv.no + '</b> <span class="small muted">' + r.n + ' peserta ikut memilih</span>' + rows +
+      '<div class="small">Yang benar sebelum diskusi <b>' + pct(okB, r.n) + '%</b>, sesudah <b>' + pct(okA, r.n) + '%</b>. ' + r.to_ok + ' orang berpindah ke jawaban benar, ' + r.to_bad + ' berpindah ke salah, ' + r.same_ok + ' tetap benar, ' + r.same_bad + ' tetap salah.' +
+      (rv.mine ? ' Suaramu: <b>' + rv.mine + '</b>.' : '') + '</div><span class="small muted"><i class="rvk a"></i>jawaban awal <i class="rvk b"></i>sesudah diskusi</span></div>';
+  }
+  function spotbarInner(E) {
+    var sp = E.spot, rv = E.rv; if (!sp) return '';
+    var t = '📣 Sedang dibahas: <b>soal ' + sp.no + '</b> <button class="btn btn-sm" type="button" data-act="dk-go" data-v="' + sp.no + '">Ke soal ' + sp.no + '</button>';
+    if (rv && rv.no === sp.no) {
+      if (rv.open) t += ' · 🗳 Suara ulang dibuka: <b>' + rv.voted + ' dari ' + rv.eligible + '</b> sudah memilih' + (rv.mine ? ' (suaramu: ' + rv.mine + ')' : '');
+      else if (rv.res && rv.res.n) t += ' · Hasil suara ulang tersedia <button class="btn btn-sm" type="button" data-act="dk-show">Lihat hasil</button>';
+    }
+    if (isAdm()) t += ' <button class="btn btn-sm" type="button" data-act="dk-unspot">Hentikan sorotan</button>';
+    return t;
+  }
+  function dkRow(E, q, adm, hot) {
+    var sp = E.spot, p = q.show && q.n ? pct(q.ok, q.n) : null, isSp = sp && sp.no === q.no;
+    var mine = q.mine ? (q.show ? (q.mine === q.key ? '<span class="ok-t">benar (' + q.mine + ')</span>' : '<span class="bad-t">salah (' + q.mine + ', kunci ' + esc(q.key || '-') + ')</span>') : esc(q.mine)) : 'kosong';
+    return '<div class="dkrow' + (isSp ? ' sp' : '') + '"><button type="button" class="rk" data-act="dk-go" data-v="' + q.no + '" title="Buka soal ' + q.no + '">' + q.no + '</button>' +
+      '<div class="grow col" style="gap:3px"><div class="small"><b>' + esc(q.sy) + '</b> · ' + esc(q.ty) + (hot ? ' <span class="badge b-bad">Bahas dulu</span>' : '') + (isSp ? ' <span class="badge b-spot">Sedang dibahas</span>' : '') + (q.expl ? ' <span class="badge b-info">Ada pembahasan</span>' : '') + '</div>' +
+      (p === null ? '<span class="small muted">Kunci belum dibuka (mode satu per satu)</span>' : '<div class="bar ' + lvl(p) + '"><i style="width:' + p + '%"></i></div><div class="small muted">' + q.ok + ' dari ' + q.n + ' benar (' + p + '%) · jawabanmu ' + mine + '</div>') + '</div>' +
+      '<button type="button" class="handbtn' + (q.my_hand ? ' on' : '') + '" data-act="dk-hand" data-v="' + q.no + '" aria-pressed="' + !!q.my_hand + '" title="Minta soal ini dibahas">✋' + (q.hands ? ' ' + q.hands : '') + '</button>' +
+      (adm ? '<span class="col" style="gap:4px"><button class="btn btn-sm" type="button" data-act="dk-spot" data-v="' + q.no + '">Sorot</button><button class="btn btn-sm" type="button" data-act="dk-revote" data-v="' + q.no + '">Suara ulang</button></span>' : '') + '</div>';
   }
   function dkHtml(E) {
     if (!dkAvailable(E)) return '';
-    var adm = isAdm(), sp = E.spot;
-    if (!E.ui.dk) return '<div class="dk dk-min"><button class="btn btn-sm" type="button" data-act="dk-toggle">Bantuan diskusi' + ((E.discussing || sp) ? ' <span class="pulse" aria-label="sedang aktif"></span>' : '') + '</button></div>';
-    var rc = E.rc, rows = '', hot = 0;
+    var adm = isAdm(), rv = E.rv;
+    if (!E.ui.dk) return '<div class="dk dk-min"><button class="btn btn-sm" type="button" data-act="dk-toggle">Bantuan diskusi' + ((E.discussing || E.spot) ? ' <span class="pulse" aria-label="sedang aktif"></span>' : '') + '</button></div>';
+    var rc = E.rc, rows = '', hidden = 0, shown = 0;
     if (rc && rc.qs && rc.qs.length) {
-      var list = rc.qs.slice().sort(function (a, b) {
+      var hotNo = {};
+      rc.qs.filter(function (q) { return q.show && q.n >= 2 && pct(q.ok, q.n) < 60; }).sort(function (a, b) { return pct(a.ok, a.n) - pct(b.ok, b.n) || a.no - b.no; }).slice(0, 3).forEach(function (q) { hotNo[q.no] = true; });
+      var list = rc.qs.slice();
+      if (E.ui.dksort === 'salah') list.sort(function (a, b) {
         var pa = a.show && a.n ? pct(a.ok, a.n) : 101, pb = b.show && b.n ? pct(b.ok, b.n) : 101;
         return (pa - (a.hands || 0) * 12) - (pb - (b.hands || 0) * 12) || a.no - b.no;
+      }); else list.sort(function (a, b) { return a.no - b.no; });
+      list.forEach(function (q) {
+        var allOk = q.show && q.n >= 2 && q.ok === q.n, keep = (E.spot && E.spot.no === q.no) || (rv && rv.no === q.no);
+        if (E.ui.dkhide && allOk && !keep) { hidden++; return; }
+        shown++; rows += dkRow(E, q, adm, !!hotNo[q.no]);
       });
-      rows = list.map(function (q) {
-        var p = q.show && q.n ? pct(q.ok, q.n) : null, isSp = sp && sp.no === q.no;
-        var mine = q.mine ? (q.show ? (q.mine === q.key ? '<span class="ok-t">benar (' + q.mine + ')</span>' : '<span class="bad-t">salah (' + q.mine + ', kunci ' + esc(q.key || '-') + ')</span>') : esc(q.mine)) : 'kosong';
-        var tag = (p !== null && q.n >= 2 && p < 60 && hot < 3) ? (hot++, ' <span class="badge b-bad">Bahas dulu</span>') : '';
-        return '<div class="dkrow' + (isSp ? ' sp' : '') + '"><button type="button" class="rk" data-act="dk-go" data-v="' + q.no + '" title="Buka soal ' + q.no + '">' + q.no + '</button>' +
-          '<div class="grow col" style="gap:3px"><div class="small"><b>' + esc(q.sy) + '</b> · ' + esc(q.ty) + tag + (isSp ? ' <span class="badge b-spot">Sedang dibahas</span>' : '') + (q.expl ? ' <span class="badge b-info">Ada pembahasan</span>' : '') + '</div>' +
-          (p === null ? '<span class="small muted">Kunci belum dibuka (mode satu per satu)</span>' : '<div class="bar ' + lvl(p) + '"><i style="width:' + p + '%"></i></div><div class="small muted">' + q.ok + ' dari ' + q.n + ' benar (' + p + '%) · jawabanmu ' + mine + '</div>') + '</div>' +
-          '<button type="button" class="handbtn' + (q.my_hand ? ' on' : '') + '" data-act="dk-hand" data-v="' + q.no + '" aria-pressed="' + !!q.my_hand + '" title="Minta soal ini dibahas">✋' + (q.hands ? ' ' + q.hands : '') + '</button>' +
-          (adm ? '<span class="col" style="gap:4px"><button class="btn btn-sm" type="button" data-act="dk-spot" data-v="' + q.no + '">Sorot</button><button class="btn btn-sm" type="button" data-act="dk-spot" data-v="' + q.no + '" data-pick="1">Penjelas</button></span>' : '') + '</div>';
-      }).join('');
     }
     var sel = '';
     if (rc && rc.blocks > 1) { sel = '<select class="input" data-change="dk-block" aria-label="Pilih bagian" style="height:34px;width:auto;padding:0 8px">'; for (var i = 1; i <= rc.blocks; i++) sel += '<option value="' + i + '"' + (i === rc.block ? ' selected' : '') + '>Bagian ' + i + '</option>'; sel += '</select>'; }
-    var spotLine = sp ? '<div class="spotline">📣 Sedang dibahas: <b>soal ' + sp.no + '</b>' + (sp.explainer ? ' · Giliran menjelaskan: <b>' + esc(sp.explainer) + '</b>' : '') +
-      ' <button class="btn btn-sm" type="button" data-act="dk-go" data-v="' + sp.no + '">Ke soal ' + sp.no + '</button>' + (adm ? ' <button class="btn btn-sm" type="button" data-act="dk-unspot">Hentikan sorotan</button>' : '') + '</div>' : '';
+    var rvLine = '';
+    if (rv && rv.open) {
+      rvLine = '<div class="spotline">🗳 Suara ulang soal <b>' + rv.no + '</b> dibuka: <b>' + rv.voted + ' dari ' + rv.eligible + '</b> sudah memilih. ' +
+        (qAccessible(E, rv.no) ? '<button class="btn btn-sm" type="button" data-act="dk-go" data-v="' + rv.no + '">Pilih jawabanmu</button>' : '<span class="small">Selesaikan bagiannya dulu untuk ikut.</span>') +
+        (adm ? ' <button class="btn btn-sm btn-primary" type="button" data-act="dk-revote-close">Tutup dan tampilkan hasil</button>' : '') + '</div>';
+    }
+    var tools = '<div class="dktools"><label class="small row row-c" style="gap:6px;flex-wrap:nowrap">Urutan<select class="input" data-change="dk-sort" aria-label="Urutan daftar" style="height:34px;width:auto;padding:0 8px"><option value="no"' + (E.ui.dksort !== 'salah' ? ' selected' : '') + '>Berurutan (nomor)</option><option value="salah"' + (E.ui.dksort === 'salah' ? ' selected' : '') + '>Paling banyak salah dulu</option></select></label>' +
+      '<label class="small row row-c" style="gap:6px;flex-wrap:nowrap;cursor:pointer" title="Berlaku bila minimal 2 peserta sudah menyelesaikan bagian ini"><input type="checkbox" data-change="dk-hide"' + (E.ui.dkhide ? ' checked' : '') + '>Sembunyikan soal yang semua pesertanya benar</label></div>';
+    var info = rc ? '<span class="small muted">' + rc.final + ' dari ' + rc.all + ' peserta sudah menyelesaikan bagian ini · <b>' + shown + ' soal</b> ditampilkan' + (hidden ? ', ' + hidden + ' disembunyikan karena semua benar <button class="btn btn-sm" type="button" data-act="dk-hide-off">Tampilkan semua</button>' : '') + (shown > 6 ? ' · gulir untuk melihat semua' : '') + '. Tekan ✋ untuk meminta soal dibahas.</span>' : '';
     return '<div class="dk"><div class="row row-c between" style="gap:8px"><span class="bold">Bantuan diskusi' + (rc && rc.block ? ' · Bagian ' + rc.block : '') + '</span>' +
       '<span class="row row-c" style="gap:10px">' + sel + '<label class="small row row-c" style="gap:6px;flex-wrap:nowrap;cursor:pointer"><input type="checkbox" data-change="dk-follow"' + (E.follow ? ' checked' : '') + '>Ikuti sorotan admin</label>' +
-      '<button class="btn btn-sm" type="button" data-act="dk-toggle">Sembunyikan</button></span></div>' + spotLine +
-      (rc ? (rows ? '<span class="small muted">' + rc.final + ' dari ' + rc.all + ' peserta sudah menyelesaikan bagian ini. Diurutkan dari yang paling banyak salah. Tekan ✋ untuk meminta soal dibahas.</span><div class="dklist">' + rows + '</div>' : '<span class="small muted">Belum ada soal yang bisa dibahas. Selesaikan satu bagian dulu.</span>') : '<span class="small muted">Memuat...</span>') + '</div>';
+      '<button class="btn btn-sm" type="button" data-act="dk-toggle">Sembunyikan</button></span></div>' + rvLine + rvResultHtml(E) +
+      (rc ? (rc.qs && rc.qs.length ? tools + info + '<div class="dklist">' + (rows || '<span class="small muted">Semua soal disembunyikan karena semua pesertanya benar.</span>') + '</div>' : '<span class="small muted">Belum ada soal yang bisa dibahas. Selesaikan satu bagian dulu.</span>') : '<span class="small muted">Memuat...</span>') + '</div>';
   }
-  H['dk-toggle'] = function () { var E = S.exam; E.ui.dk = !E.ui.dk; uiSet('dk', E.ui.dk); if (E.ui.dk) loadRecap(E, E.rcPick); updateDk(E); };
+  H['dk-toggle'] = function () { var E = S.exam; E.ui.dk = !E.ui.dk; uiSet('dk', E.ui.dk); if (E.ui.dk) loadRecap(E, E.rcPick); updateDk(E, true); };
+  H['dk-show'] = function () { var E = S.exam; E.ui.dk = true; uiSet('dk', true); updateDk(E, true); loadRecap(E, E.rcPick); };
   H['dk-follow'] = function (el) { if (S.exam) S.exam.follow = el.checked; };
+  H['dk-sort'] = function (el) { var E = S.exam; E.ui.dksort = el.value; uiSet('dksort', el.value); updateDk(E, true); };
+  H['dk-hide'] = function (el) { var E = S.exam; E.ui.dkhide = el.checked; uiSet('dkhide', el.checked); updateDk(E, true); };
+  H['dk-hide-off'] = function () { var E = S.exam; E.ui.dkhide = false; uiSet('dkhide', false); updateDk(E, true); };
   H['dk-block'] = function (el) { var E = S.exam; E.rcPick = +el.value; loadRecap(E, E.rcPick); };
   H['dk-go'] = function (el) {
-    var E = S.exam, i = +el.dataset.v - 1, q = E.qs[i];
-    if (!q || q.locked) { toast('Soal ini belum bisa dibuka. Selesaikan bagiannya dulu.', true); return; }
-    E.idx = i; E.panel = false; renderExam(); window.scrollTo(0, 0); peersFor(E);
+    var E = S.exam, no = +el.dataset.v;
+    if (!jumpTo(E, no)) toast('Soal ini belum bisa dibuka. Selesaikan bagiannya dulu.', true);
   };
   H['dk-hand'] = async function (el) {
     var E = S.exam, no = +el.dataset.v, q = E.qs[no - 1]; if (!q || q.locked) return;
@@ -787,7 +857,7 @@
     try {
       var r = await Api.call('app_hand', { p_session: E.id, p_qid: q.id, p_on: on });
       if (row) { row.my_hand = on; row.hands = r.hands; }
-      updateDk(E);
+      updateDk(E, true);
       var cur = E.qs[E.idx]; if (cur && cur.id === q.id) renderExam();
     } catch (e) { toast(e.message, true); }
   };
@@ -795,8 +865,8 @@
     var E = S.exam; if (!E || !isAdm()) return;
     el.disabled = true;
     try {
-      var r = await Api.call('adm_flow', { p_session: E.id, p_action: 'spot', p_no: +el.dataset.v, p_pick: el.dataset.pick === '1' });
-      toast('Soal ' + el.dataset.v + ' disorot' + (el.dataset.pick === '1' ? (r.explainer ? '. Penjelas: ' + r.explainer + '.' : '. Belum ada teman yang menjawab benar.') : '.'));
+      await Api.call('adm_flow', { p_session: E.id, p_action: 'spot', p_no: +el.dataset.v });
+      toast('Soal ' + el.dataset.v + ' disorot di layar peserta.');
       await pollRev();
     } catch (e) { toast(e.message, true); }
     el.disabled = false;
@@ -805,17 +875,138 @@
     var E = S.exam; if (!E || !isAdm()) return;
     try { await Api.call('adm_flow', { p_session: E.id, p_action: 'unspot' }); await pollRev(); } catch (e) { toast(e.message, true); }
   };
-  H['expl-save'] = async function (el) {
+  H['dk-revote'] = async function (el) {
     var E = S.exam; if (!E || !isAdm()) return;
-    var ta = document.getElementById('explta'); if (!ta) return;
+    var ok = await confirmDialog('Buka suara ulang untuk soal ' + el.dataset.v + '?', 'Soal itu ikut disorot. Peserta yang sudah menyelesaikan bagiannya memilih jawaban lagi (rahasia sampai ditutup), lalu hasilnya dibandingkan dengan jawaban awal. Catatan: kunci soal ini sudah pernah terlihat peserta, jadi suara ulang mengandalkan kejujuran; kunci disembunyikan di layar selama suara dibuka.', 'Buka suara ulang', false);
+    if (!ok) return;
+    el.disabled = true;
     try {
-      await Api.call('adm_set_expl', { p_qid: el.dataset.v, p_body: ta.value });
-      var pe = E.peers[el.dataset.v] || (E.peers[el.dataset.v] = { n: 0, ok: 0, d: {}, at: Date.now() });
-      pe.e = ta.value.trim() || null; E.rcAt = 0;
-      toast(pe.e ? 'Pembahasan kelompok disimpan.' : 'Pembahasan dihapus.');
-      renderExam(); loadRecap(E, E.rcPick);
+      await Api.call('adm_flow', { p_session: E.id, p_action: 'revote_open', p_no: +el.dataset.v });
+      toast('Suara ulang soal ' + el.dataset.v + ' dibuka.');
+      await pollRev();
     } catch (e) { toast(e.message, true); }
+    el.disabled = false;
   };
+  H['dk-revote-close'] = async function () {
+    var E = S.exam; if (!E || !isAdm()) return;
+    try { await Api.call('adm_flow', { p_session: E.id, p_action: 'revote_close' }); toast('Suara ulang ditutup. Hasil tampil di layar semua peserta.'); await pollRev(); }
+    catch (e) { toast(e.message, true); }
+  };
+  async function castRevote(E, L) {
+    if (E.revoteBusy) return;
+    E.revoteBusy = true;
+    try {
+      await Api.call('app_revote', { p_session: E.id, p_answer: L });
+      if (E.rv) { if (!E.rv.mine) E.rv.voted = (E.rv.voted || 0) + 1; E.rv.mine = L; }
+      toast('Suaramu: ' + L + '. Masih bisa diubah sampai admin menutup.');
+      renderExam();
+    } catch (e) { toast(e.message, true); }
+    E.revoteBusy = false;
+  }
+
+  /* ---------- pembahasan kelompok: satu teks bersama, bisa memuat gambar tempel ---------- */
+  function exCtx(c) {
+    if (c === 'r') { var v = S.rv; return v ? { sid: v.id, info: v.info, ex: v.ex, exImg: v.exImg, rerender: renderReview } : null; }
+    var E = S.exam; return E ? { sid: E.id, info: E.peers, ex: E.ex, exImg: E.exImg, rerender: renderExam } : null;
+  }
+  function exBoxHtml(c, qid) {
+    var X = exCtx(c); if (!X) return '';
+    var inf = X.info[qid] || {}, d = X.ex[qid];
+    if (d) return exEditorHtml(c, qid, d);
+    var head = '<div class="row row-c between" style="gap:8px"><b>Pembahasan kelompok</b><button class="btn btn-sm" type="button" data-act="ex-open" data-c="' + c + '" data-v="' + qid + '">' + (inf.e || inf.ei ? 'Ubah' : 'Tulis pembahasan') + '</button></div>';
+    if (!(inf.e || inf.ei)) return '<div class="expl empty">' + head + '<span class="small muted">Belum ada pembahasan. Semua peserta boleh menulis (satu teks bersama).</span></div>';
+    var im = X.exImg[qid], imgs = im && im.v === inf.ev ? im.images : null;
+    var figs = imgs ? imgs.map(function (s) { var ok = safeImg(s); return ok ? '<img class="exfig zoomable" data-act="zoom" src="' + ok + '" alt="Gambar pembahasan (ketuk untuk memperbesar)">' : ''; }).join('') : (inf.ei ? '<span class="small muted">Memuat ' + inf.ei + ' gambar...</span>' : '');
+    return '<div class="expl">' + head + (inf.e ? '<p>' + esc(inf.e) + '</p>' : '') + (figs ? '<div class="exfigs">' + figs + '</div>' : '') +
+      '<span class="small muted">' + (inf.eb ? 'Terakhir diubah oleh ' + esc(inf.eb) + '. ' : '') + 'Teks ini bersama: siapa pun yang kuncinya sudah terbuka boleh menyuntingnya.</span></div>';
+  }
+  function exEditorHtml(c, qid, d) {
+    var ids = 'data-c="' + c + '" data-v="' + qid + '"';
+    var thumbs = d.images.map(function (s, i) { return '<span class="exth"><img src="' + (safeImg(s) || '') + '" alt="Gambar ' + (i + 1) + '"><button type="button" data-act="ex-imgdel" ' + ids + ' data-i="' + i + '" aria-label="Hapus gambar ' + (i + 1) + '">×</button></span>'; }).join('');
+    return '<div class="expl editing"><b>Pembahasan kelompok (sunting)</b>' +
+      '<textarea class="input" rows="4" maxlength="3000" data-paste="1" data-input="ex-input" ' + ids + ' placeholder="Tulis pembahasan. Tempel gambar dengan Ctrl+V atau Cmd+V di kotak ini." aria-label="Pembahasan kelompok">' + esc(d.text) + '</textarea>' +
+      (thumbs ? '<div class="exthumbs">' + thumbs + '</div>' : '') +
+      '<div class="row row-c" style="gap:8px;flex-wrap:wrap"><label class="btn btn-sm" style="cursor:pointer">Tambah gambar<input type="file" accept="image/*" multiple style="display:none" data-change="ex-file" ' + ids + '></label>' +
+      '<span class="small muted">' + d.images.length + ' dari 4 gambar</span><span style="flex:1"></span>' +
+      '<button class="btn btn-sm" type="button" data-act="ex-cancel" ' + ids + '>Batal</button><button class="btn btn-sm btn-primary" type="button" data-act="ex-save" ' + ids + (d.busy ? ' disabled' : '') + '>' + (d.busy ? 'Menyimpan...' : 'Simpan') + '</button></div>' +
+      '<span class="small muted">Teks ini bersama untuk semua peserta. Kalau orang lain menyimpan lebih dulu, kamu diberi tahu sebelum menimpa.</span></div>';
+  }
+  function shrinkFile(file) {
+    return new Promise(function (resolve, reject) {
+      var fr = new FileReader();
+      fr.onerror = function () { reject(new Error('Gambar tidak bisa dibaca.')); };
+      fr.onload = function () {
+        var img = new Image();
+        img.onerror = function () { reject(new Error('Gambar tidak bisa dibaca.')); };
+        img.onload = function () {
+          var k = Math.min(1, 1000 / Math.max(img.width, img.height)), c = document.createElement('canvas');
+          c.width = Math.max(1, Math.round(img.width * k)); c.height = Math.max(1, Math.round(img.height * k));
+          var g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0, c.width, c.height);
+          var out = c.toDataURL('image/jpeg', 0.8); if (out.length > 450000) out = c.toDataURL('image/jpeg', 0.6);
+          if (out.length > 480000) reject(new Error('Gambar terlalu besar. Potong atau perkecil dulu.')); else resolve(out);
+        };
+        img.src = fr.result;
+      };
+      fr.readAsDataURL(file);
+    });
+  }
+  async function exAddFiles(c, qid, files) {
+    var X = exCtx(c); if (!X || !X.ex[qid]) return;
+    var d = X.ex[qid];
+    for (var i = 0; i < files.length; i++) {
+      if (d.images.length >= 4) { toast('Maksimal 4 gambar per pembahasan.', true); break; }
+      try { d.images.push(await shrinkFile(files[i])); } catch (e) { toast(e.message, true); }
+    }
+    X.rerender();
+  }
+  H['ex-open'] = async function (el) {
+    var X = exCtx(el.dataset.c), qid = el.dataset.v; if (!X) return;
+    el.disabled = true;
+    try {
+      var r = await Api.call('app_expl_get', { p_session: X.sid, p_qid: qid });
+      X.ex[qid] = { text: r.body || '', images: (r.images || []).slice(), v: r.v, busy: false };
+      X.info[qid] = Object.assign(X.info[qid] || {}, { e: r.body, ev: r.v, eb: r.by, ei: (r.images || []).length });
+      X.exImg[qid] = { v: r.v, images: (r.images || []).slice() };
+    } catch (e) { toast(e.message, true); }
+    X.rerender();
+  };
+  H['ex-input'] = function (el) { var X = exCtx(el.dataset.c); if (X && X.ex[el.dataset.v]) X.ex[el.dataset.v].text = el.value; };
+  H['ex-cancel'] = function (el) { var X = exCtx(el.dataset.c); if (X) { delete X.ex[el.dataset.v]; X.rerender(); } };
+  H['ex-imgdel'] = function (el) { var X = exCtx(el.dataset.c); if (X && X.ex[el.dataset.v]) { X.ex[el.dataset.v].images.splice(+el.dataset.i, 1); X.rerender(); } };
+  H['ex-file'] = function (el) { var fl = Array.prototype.slice.call(el.files || []); el.value = ''; exAddFiles(el.dataset.c, el.dataset.v, fl); };
+  H['ex-save'] = function (el) { return exSave(el.dataset.c, el.dataset.v); };
+  async function exSave(c, qid) {
+    var X = exCtx(c); if (!X || !X.ex[qid]) return;
+    var d = X.ex[qid]; d.busy = true; X.rerender();
+    try {
+      var r = await Api.call('app_expl_set', { p_session: X.sid, p_qid: qid, p_body: d.text, p_images: d.images, p_version: d.v });
+      delete X.ex[qid];
+      if (r.deleted) { X.info[qid] = { e: null, ev: null, eb: null, ei: 0 }; delete X.exImg[qid]; toast('Pembahasan dihapus.'); }
+      else { X.info[qid] = { e: d.text.trim() || null, ev: r.v, eb: r.by, ei: d.images.length }; X.exImg[qid] = { v: r.v, images: d.images.slice() }; toast('Pembahasan disimpan.'); }
+      if (c === 'e' && S.exam) S.exam.rcAt = 0;
+    } catch (e) {
+      d.busy = false;
+      if (e.code === 'P0410') {
+        var lat = null; try { lat = await Api.call('app_expl_get', { p_session: X.sid, p_qid: qid }); } catch (e2) { /* abaikan */ }
+        var ch = await dialog({
+          title: 'Pembahasan sudah diubah orang lain',
+          text: e.message + (lat && lat.body ? ' Versi terbaru: "' + lat.body.slice(0, 160) + (lat.body.length > 160 ? '..."' : '"') : ''),
+          buttons: [{ label: 'Lanjut menyunting', value: 'keep' }, { label: 'Muat versi terbaru', value: 'load' }, { label: 'Timpa dengan tulisanku', value: 'over', cls: 'btn-danger' }]
+        });
+        if (ch === 'over' && lat) { d.v = lat.v; return exSave(c, qid); }
+        if (ch === 'load' && lat) { d.text = lat.body || ''; d.images = (lat.images || []).slice(); d.v = lat.v; }
+      } else toast(e.message, true);
+    }
+    X.rerender();
+  }
+  function ensureExImages(E, qid) {
+    var inf = E.peers[qid]; if (!inf || !(inf.ei > 0)) return;
+    var cur = E.exImg[qid]; if (cur && cur.v === inf.ev) return;
+    Api.call('app_expl_get', { p_session: E.id, p_qid: qid }).then(function (r) {
+      E.exImg[qid] = { v: r.v, images: r.images || [] };
+      if (S.exam === E && E.qs[E.idx] && E.qs[E.idx].id === qid && !E.ex[qid]) renderExam();
+    }).catch(noop);
+  }
 
   function headHtml(E, total) {
     return '<div class="exam-head"><div class="col" style="gap:0"><span class="small bold muted">' + (E.session.kind === 'latihan' ? 'Latihan pribadi' : 'Sesi') + '</span><span class="bold" style="font-size:18px">' + esc(E.session.title) + '</span></div>' +
@@ -827,6 +1018,7 @@
       '<button class="btn btn-primary" type="button" data-act="exam-submit"' + (E.submitting ? ' disabled' : '') + '>Kumpulkan</button></div></div>' +
       '<div id="savebanner" class="alert-bar hidden" role="alert"></div>' +
       (E.paused ? '' : '<div id="partbar" class="part-bar' + (partInner(E) ? '' : ' hidden') + '" role="status">' + partInner(E) + '</div>' +
+        '<div id="spotbar" class="spotbar' + (spotbarInner(E) ? '' : ' hidden') + '" role="status">' + spotbarInner(E) + '</div>' +
         (S.me && S.me.role === 'admin' && E.session.kind !== 'latihan' ? '<div id="adminbar" class="admin-bar">' + adminBarInner(E) + '</div>' : ''));
   }
 
@@ -853,9 +1045,11 @@
     var answeredN = 0;
     E.qs.forEach(function (x) { if (!x.locked && E.answers[x.id]) answeredN++; });
     var key = E.keys[q.id], sel = E.answers[q.id];
+    var rvOpen = rvActive(E, q);   // suara ulang: kunci disembunyikan, pilihan = suara ulang
+    if (rvOpen) { key = null; sel = E.rv.mine || null; }
     var letters = ['A', 'B', 'C', 'D', 'E'];
     var img = lockedQ ? null : safeImg(q.image);
-    var frozen = !!(key || E.submitting || E.idx < E.locked || disc);
+    var frozen = rvOpen ? !!E.submitting : !!(key || E.submitting || E.idx < E.locked || disc);
     var pe = (!lockedQ && key && E.session.kind !== 'latihan') ? E.peers[q.id] : null;
     if (pe && !(pe.n >= 2)) pe = null;
     var elim = E.elim[q.id] || {};
@@ -877,15 +1071,15 @@
     var status = '';
     if (key) status = sel === key ? '<span class="badge b-ok">Benar</span>' : '<span class="badge b-bad">Salah</span>';
     var peerChip = pe ? '<span class="chip chip-peer" title="Dari peserta yang sudah menyelesaikan soal ini">' + pct(pe.ok, pe.n) + '% peserta benar · ' + pe.ok + ' dari ' + pe.n + '</span>' : '';
-    var spotTag = (E.spot && E.spot.no === E.idx + 1) ? '<span class="badge b-spot">📣 Sedang dibahas' + (E.spot.explainer ? ' · penjelas: ' + esc(E.spot.explainer) : '') + '</span>' : '';
+    var spotTag = (E.spot && E.spot.no === E.idx + 1) ? '<span class="badge b-spot">📣 Sedang dibahas</span>' : '';
     var hrow = (!lockedQ && key && E.rc && E.rc.qs) ? E.rc.qs.filter(function (r) { return r.no === E.idx + 1; })[0] : null;
     var handBtn = hrow ? '<button type="button" class="handbtn' + (hrow.my_hand ? ' on' : '') + '" data-act="dk-hand" data-v="' + (E.idx + 1) + '" aria-pressed="' + !!hrow.my_hand + '" title="Minta soal ini dibahas">✋' + (hrow.hands ? ' ' + hrow.hands : '') + '</button>' : '';
-    var exTxt = (!lockedQ && key) ? ((E.peers[q.id] || {}).e || '') : '';
-    var exBox = (!lockedQ && key) ? ((exTxt ? '<div class="expl"><b>Pembahasan kelompok</b><p>' + esc(exTxt) + '</p></div>' : '') +
-      (isAdm() ? '<details class="notebox"><summary>' + (exTxt ? 'Ubah' : 'Tulis') + ' pembahasan kelompok (admin)</summary><textarea class="input" rows="3" maxlength="3000" id="explta" placeholder="Pembahasan singkat. Tampil ke semua peserta setelah kunci terbuka dan di Tinjau." aria-label="Pembahasan kelompok">' + esc(exTxt) + '</textarea>' +
-        '<div class="row" style="gap:8px;margin-top:6px"><button class="btn btn-sm btn-primary" type="button" data-act="expl-save" data-v="' + q.id + '">Simpan pembahasan</button></div></details>' : '')) : '';
+    var exBox = (!lockedQ && key) ? exBoxHtml('e', q.id) : '';
+    var rvCard = '';
+    if (rvOpen) rvCard = '<div class="spotline" role="status">🗳 <b>Suara ulang</b>: pilih jawaban yang menurutmu benar sesudah diskusi. Kunci disembunyikan sementara. ' + E.rv.voted + ' dari ' + E.rv.eligible + ' sudah memilih' + (E.rv.mine ? '. Suaramu: <b>' + E.rv.mine + '</b> (bisa diubah sampai admin menutup)' : '') + '.</div>';
+    else if (!lockedQ && E.rv && E.rv.open && E.rv.no === q.no) rvCard = '<div class="spotline" role="status">🗳 Suara ulang dibuka untuk soal ini. Selesaikan bagiannya dulu untuk ikut memilih.</div>';
     var bi = blockInfo(E, E.idx), blockMsg = '', finBar = '';
-    if (bi && !key && !lockedQ) {
+    if (bi && !key && !lockedQ && !rvOpen) {
       if (E.idx < E.locked) blockMsg = '<div class="notice">Blok ini sudah diselesaikan. <button class="btn btn-sm btn-primary" type="button" data-act="show-key">Lihat jawaban nomor ' + (E.idx + 1) + '</button></div>';
       else blockMsg = '<div class="notice">Kunci blok soal ' + (bi.start + 1) + ' sampai ' + (bi.end + 1) + ' tampil setelah blok diselesaikan.</div>';
     }
@@ -913,7 +1107,7 @@
       '<span class="small muted">Tersimpan otomatis. Soal bercatatan bisa dilatih ulang di menu Latihan.</span></details>';
 
     var qHtml = lockedQ ? lockCard(E, q) :
-      '<div class="row row-c qhead"><span class="chip">Asal file: ' + esc(q.file || q.bank) + '</span><span class="qno">Soal ' + (E.idx + 1) + '</span>' + flagBtn + hlBtn + handBtn + status + peerChip + spotTag + '</div>' +
+      '<div class="row row-c qhead"><span class="chip">Asal file: ' + esc(q.file || q.bank) + '</span><span class="qno">Soal ' + (E.idx + 1) + '</span>' + flagBtn + hlBtn + handBtn + status + peerChip + spotTag + '</div>' + rvCard +
       '<p class="stem' + (E.hlOn ? ' hlmode' : '') + '">' + stemHtml(E, q) + '</p>' + (img ? '<img class="qimg zoomable" data-act="zoom" src="' + img + '" alt="Gambar pada soal (ketuk untuk memperbesar)">' : '') +
       '<div class="opts" role="group" aria-label="Pilihan jawaban">' + opts + '</div>' + blockMsg + finBar + exBox + noteHtml;
     if (lockedQ && finBar.indexOf('belum dibuka') < 0) qHtml += finBar;
@@ -924,12 +1118,10 @@
       '<div class="exam-body"><div class="exam-main"><div id="dkwrap">' + dkHtml(E) + '</div><div class="qcard">' + qHtml + '</div>' +
       '<div class="nav-actions exam-foot"><button class="btn" type="button" data-act="prev"' + (E.idx === 0 ? ' disabled' : '') + '>Sebelumnya</button>' +
       (S.me && S.me.role === 'admin' && !lockedQ && E.session.kind !== 'latihan' ? '<button class="btn btn-danger" type="button" data-act="swap">Ganti soal ini</button>' : '') +
-      '<button class="btn only-mobile" type="button" data-act="panel">Daftar soal</button>' +
+      (E.ui.nav ? '<button class="btn only-mobile" type="button" data-act="panel">Daftar soal</button>' : '<button class="btn" type="button" data-act="nav-toggle" title="Tampilkan daftar nomor soal">Tampilkan daftar soal (' + answeredN + ' dari ' + total + ' terjawab)</button>') +
       '<button class="btn btn-primary" type="button" data-act="next"' + (E.idx === total - 1 ? ' disabled' : '') + '>Selanjutnya</button></div></div>' +
-      (E.ui.nav
-        ? '<aside class="exam-side' + (E.panel ? '' : ' closed') + '" aria-label="Navigasi soal"><div class="row row-c between" style="gap:8px"><span class="bold" style="font-size:16px">Navigasi soal</span><button class="btn btn-sm" type="button" data-act="nav-toggle" title="Sembunyikan daftar nomor">Sembunyikan</button></div>' +
-          navHtml(E) + '<p class="small muted">' + esc(fbLabel(E.session.feedback_mode)) + '. Jawaban tersimpan otomatis.</p></aside>'
-        : '<aside class="exam-side min' + (E.panel ? '' : ' closed') + '" aria-label="Navigasi soal"><button class="btn btn-sm" type="button" data-act="nav-toggle">Tampilkan daftar soal</button><span class="small muted">' + E.qs.filter(function (x) { return !x.locked && E.answers[x.id]; }).length + ' dari ' + total + ' terjawab</span></aside>') +
+      (E.ui.nav ? '<aside class="exam-side' + (E.panel ? '' : ' closed') + '" aria-label="Navigasi soal"><div class="row row-c between" style="gap:8px"><span class="bold" style="font-size:16px">Navigasi soal</span><button class="btn btn-sm" type="button" data-act="nav-toggle" title="Sembunyikan daftar nomor">Sembunyikan</button></div>' +
+          navHtml(E) + '<p class="small muted">' + esc(fbLabel(E.session.feedback_mode)) + '. Jawaban tersimpan otomatis.</p></aside>' : '') +
       '</div>' + gateHtml(E);
     var side = root.querySelector('.exam-side');
     if (side) {
@@ -959,6 +1151,7 @@
   function pickLetter(L) {
     var E = S.exam; if (!E || E.submitting) return;
     var q = cur();
+    if (rvActive(E, q)) { castRevote(E, L); return; }
     if (q.locked || E.keys[q.id] || E.idx < E.locked) return;
     if (E.discussing) { toast('Sedang diskusi. Jawaban tidak bisa diubah sampai diskusi selesai.'); return; }
     if (q.options.length <= 'ABCDE'.indexOf(L)) return;
@@ -1039,14 +1232,15 @@
     var E = S.exam; if (!E) return Promise.resolve();
     clearTimeout(E.saveT);
     E.chain = E.chain.then(async function () {
-      if (!E.dirty || S.exam !== E) return;
+      if (!E.dirty || S.exam !== E || E.dead) return;
       E.dirty = false;
       try {
-        await Api.call('app_save', { p_session: E.id, p_answers: E.answers, p_flags: E.flags });
+        await Api.call('app_save', { p_session: E.id, p_answers: E.answers, p_flags: E.flags, p_client: CID });
         setSaveState('Tersimpan');
         if (E.saveFail) { E.saveFail = false; setBanner(E); }
       } catch (err) {
         E.dirty = true;
+        if (isDead(err)) { onDead(E, err); return; }
         if (err.code === '28000') { toast('Sesi login berakhir. Masuk lagi untuk melanjutkan.', true); return; }
         setSaveState('Gagal menyimpan, mencoba lagi...');
         E.saveFail = true; setBanner(E);
@@ -1104,13 +1298,14 @@
     try {
       await flushSave();
       await flushTimes(E);
-      await Api.call('app_submit', { p_session: E.id, p_answers: E.answers, p_flags: E.flags });
+      await Api.call('app_submit', { p_session: E.id, p_answers: E.answers, p_flags: E.flags, p_client: CID });
       var id = E.id;
       lsDel('bk', id);
       S.exam = null;
       go('#/hasil/' + id);
     } catch (err) {
       E.submitting = false;
+      if (isDead(err)) { onDead(E, err); return; }
       renderExam();
       toast(err.message, true);
       if (auto) setTimeout(function () { if (S.exam === E) doSubmit(true); }, 5000);
@@ -1142,18 +1337,55 @@
       }
     }
   }
+  /* keluar dari layar ujian lewat tombol Kembali / geser dua jari / ubah alamat: ditolak dan dicatat */
+  function strictNav(E) {
+    if (!E.discussing) {
+      E.viol++; logViol(E, 'navigasi', 0, false);
+      var vb = document.getElementById('violbadge'); if (vb) vb.textContent = 'Mode ketat · ' + E.viol + ' pelanggaran';
+    }
+    var msg = 'Tombol Kembali, geser dua jari, atau mengubah alamat tidak diizinkan selama ujian mode ketat. Kejadian ini tercatat dan terlihat oleh admin.';
+    if (document.querySelector('.overlay')) toast(msg, true);
+    else dialog({ title: 'Mode ketat: tidak boleh keluar dari layar ujian', text: msg, buttons: [{ label: 'Kembali ke ujian', value: true, cls: 'btn-primary' }] });
+  }
+  function strictBlocked(E, want) {
+    E.guardTs = Date.now();
+    try { history.pushState(null, '', want); } catch (e) { location.hash = want; }
+    strictNav(E);
+  }
   function installStrict(E) {
-    function later() { setTimeout(awayCheck, 150); }
+    var want = '#/ujian/' + E.id, dtN = 0, dtLogged = false;
+    function later() { setTimeout(awayCheck, 60); }
     function onFs() { if (fsEl()) E.fsSeen = true; if (S.exam === E) { renderExam(); later(); } }
     function block(e) { if (S.exam === E) e.preventDefault(); }
+    // Kembali yang jatuh ke entri riwayat dengan alamat sama (hash tidak berubah): dorong lagi dan catat
+    function onPop() {
+      if (S.exam !== E || E.submitting || E.dead) return;
+      if (location.hash === want) { E.guardTs = Date.now(); try { history.pushState(null, '', want); } catch (e) { /* abaikan */ } strictNav(E); }
+    }
+    function onUnload(e) { if (S.exam === E && !E.submitting) { e.preventDefault(); e.returnValue = ''; return ''; } }
+    try { history.pushState(null, '', location.href); } catch (e) { /* abaikan */ }   // entri cadangan supaya Kembali pertama tetap di dalam situs
+    window.addEventListener('popstate', onPop);
+    window.addEventListener('beforeunload', onUnload);
     window.addEventListener('blur', later);
     window.addEventListener('focus', later);
     document.addEventListener('visibilitychange', awayCheck);
     document.addEventListener('fullscreenchange', onFs);
     document.addEventListener('webkitfullscreenchange', onFs);
     ['contextmenu', 'copy', 'cut', 'dragstart'].forEach(function (ev) { document.addEventListener(ev, block); });
+    // developer tools yang menempel di jendela saat layar penuh (perkiraan, bisa meleset)
+    var dti = setInterval(function () {
+      if (S.exam !== E || E.discussing || E.submitting || !fsEl()) { dtN = 0; return; }
+      var big = (window.outerWidth - window.innerWidth > 180) || (window.outerHeight - window.innerHeight > 180);
+      if (big) {
+        dtN++;
+        if (dtN >= 2 && !dtLogged) { dtLogged = true; E.viol++; logViol(E, 'devtools', 0, false); toast('Mode ketat: ukuran jendela tidak wajar (kemungkinan developer tools terbuka). Tercatat.', true); }
+      } else { dtN = 0; dtLogged = false; }
+    }, 3000);
     root.classList.add('strict');
     onCleanup(function () {
+      clearInterval(dti);
+      window.removeEventListener('popstate', onPop);
+      window.removeEventListener('beforeunload', onUnload);
       window.removeEventListener('blur', later);
       window.removeEventListener('focus', later);
       document.removeEventListener('visibilitychange', awayCheck);
@@ -1431,7 +1663,11 @@
         try { peers = await Api.call('app_peers', { p_session: id, p_qids: res.questions.map(function (q) { return q.id; }) }) || {}; } catch (e) { /* abaikan */ }
       }
       if (!ok()) return;
-      S.rv = { id: id, pid: pid || null, person: res.person || null, title: res.title, qs: res.questions, filter: 'all', system: 'all', type: 'all', only: null, peers: peers, notes: notes };
+      S.rv = { id: id, pid: pid || null, person: res.person || null, title: res.title, qs: res.questions, filter: 'all', system: 'all', type: 'all', only: null, peers: peers, notes: notes, info: {}, ex: {}, exImg: {} };
+      res.questions.forEach(function (q) { S.rv.info[q.id] = { e: q.expl, ev: q.expl_v, eb: q.expl_by, ei: q.expl_n || 0 }; });
+      if (res.questions.some(function (q) { return q.expl_n > 0; })) {
+        try { var imap = await Api.call('app_expl_images', { p_session: id }) || {}; Object.keys(imap).forEach(function (k) { S.rv.exImg[k] = { v: (S.rv.info[k] || {}).ev, images: imap[k] }; }); } catch (e) { /* abaikan */ }
+      }
       var p = ''; try { p = decodeURIComponent(param || ''); } catch (e) { p = ''; }
       if (/^no:\d+$/.test(p)) S.rv.only = +p.slice(3);
       else if (p.indexOf('||') > 0) { var a = p.split('||'); S.rv.system = a[0]; S.rv.type = a[1]; }
@@ -1475,9 +1711,7 @@
         return '<button type="button" class="opt ' + cls + '" disabled><span class="l">' + L + '</span><span class="t">' + esc(t) + '</span>' + (pe ? '<span class="pc">' + pct((pe.d || {})[L] || 0, pe.n) + '%</span>' : '') + (tag ? '<span class="tag">' + tag + '</span>' : '') + '</button>';
       }).join('');
       var peerChip = pe ? '<span class="chip chip-peer">' + pct(pe.ok, pe.n) + '% peserta benar · ' + pe.ok + ' dari ' + pe.n + '</span>' : '';
-      var exBox = (q.expl ? '<div class="expl"><b>Pembahasan kelompok</b><p>' + esc(q.expl) + '</p></div>' : '') +
-        (S.me && S.me.role === 'admin' ? '<details class="notebox"><summary>' + (q.expl ? 'Ubah' : 'Tulis') + ' pembahasan kelompok (admin)</summary><textarea class="input" rows="3" maxlength="3000" id="rvx' + q.no + '" aria-label="Pembahasan kelompok">' + esc(q.expl || '') + '</textarea>' +
-          '<div class="row" style="gap:8px;margin-top:6px"><button class="btn btn-sm btn-primary" type="button" data-act="rv-expl-save" data-v="' + q.id + '" data-n="' + q.no + '">Simpan pembahasan</button></div></details>' : '');
+      var exBox = exBoxHtml('r', q.id);
       var nt = v.notes && v.notes[q.id];
       var noteBox = v.pid ? '' : '<details class="notebox"' + (nt ? ' open' : '') + '><summary>Catatan saya' + (nt ? ' <span class="dot-on"></span>' : '') + '</summary><textarea class="input" rows="3" maxlength="2000" placeholder="Catatan untuk soal ini (hanya kamu yang melihat)" aria-label="Catatan pribadi" data-input="rv-note" data-change="rv-note-flush" data-v="' + q.id + '">' + esc(nt || '') + '</textarea></details>';
       return '<div class="qcard" id="rq' + q.no + '" style="margin-bottom:14px"><div class="row row-c qhead"><span class="qno">Soal ' + q.no + '</span>' + (q.flag ? '<span class="flagmark" title="Kamu beri bendera">' + FLAG_SVG + '</span>' : '') + st +
@@ -1491,15 +1725,6 @@
       '<span class="small muted">' + list.length + ' dari ' + v.qs.length + ' soal</span>' + (v.only != null ? '<button type="button" class="btn btn-sm" data-act="rv-filter" data-v="all">Tampilkan semua</button>' : '') + '</div>' +
       (cards || '<p class="muted">Tidak ada soal untuk filter ini.</p>') + '<p class="small muted">Tidak ada pembahasan: hanya soal, kunci, dan jawabanmu.</p>', v.person));
   }
-  H['rv-expl-save'] = async function (el) {
-    var v = S.rv, ta = document.getElementById('rvx' + el.dataset.n); if (!v || !ta) return;
-    try {
-      await Api.call('adm_set_expl', { p_qid: el.dataset.v, p_body: ta.value });
-      v.qs.forEach(function (q) { if (q.id === el.dataset.v) q.expl = ta.value.trim() || null; });
-      toast('Pembahasan kelompok disimpan.');
-      renderReview();
-    } catch (e) { toast(e.message, true); }
-  };
   H['rv-note'] = function (el) {
     var v = S.rv; if (!v) return;
     var id = el.dataset.v; v.notes[id] = el.value; clearTimeout(v.noteT);
@@ -1697,6 +1922,12 @@
   }
 
   async function route() {
+    var E0 = S.exam;
+    if (E0 && E0.session && E0.session.ketat && !E0.submitting && !E0.dead) {
+      var want = '#/ujian/' + E0.id;
+      if (location.hash !== want) { strictBlocked(E0, want); return; }              // mencoba pindah halaman: ditolak
+      if (E0.guardTs && Date.now() - E0.guardTs < 800) return;                       // hashchange sisa dari tombol Kembali
+    }
     S.rt = (S.rt || 0) + 1;
     runCleanups();
     S.exam = null;
@@ -1744,6 +1975,12 @@
       e.preventDefault();
       var h = H[f.dataset.submit];
       if (h) h(f, e);
+    });
+    root.addEventListener('paste', function (e) {
+      var t = e.target && e.target.closest ? e.target.closest('[data-paste]') : null; if (!t) return;
+      var items = (e.clipboardData && e.clipboardData.items) || [], files = [];
+      for (var i = 0; i < items.length; i++) if (items[i].kind === 'file' && /^image\//.test(items[i].type)) { var f = items[i].getAsFile(); if (f) files.push(f); }
+      if (files.length) { e.preventDefault(); exAddFiles(t.dataset.c, t.dataset.v, files); }
     });
     root.addEventListener('input', function (e) {
       var el = e.target.closest('[data-input]');
