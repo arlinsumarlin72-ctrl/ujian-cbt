@@ -1,3 +1,7 @@
+-- !! PERINGATAN (2026-11-22): file ini TIDAK LENGKAP dan lebih lama dari database yang berjalan
+-- !! (tidak ada kolom locked_n/rev/notice/system, dan beberapa fungsi versi lama).
+-- !! JANGAN dijalankan ulang di database yang sudah berisi data: fungsi yang lebih baru akan tertimpa.
+-- !! Sumber kebenaran: supabase/fungsi-live-2026-11-22.sql + patch-*.sql di folder ini.
 -- ============================================================
 -- Ruang Ujian: skema database (Supabase / PostgreSQL)
 -- Jalankan SEKALI di Supabase > SQL Editor > New query > Run.

@@ -59,6 +59,11 @@
       (avail.length ? avail.map(function (b) {
         return '<label class="checkrow"><span class="row row-c" style="gap:12px;flex-wrap:nowrap"><input type="checkbox" name="bank" value="' + b.id + '" data-n="' + b.active + '" data-change="pool-calc" checked><span class="bold">' + esc(b.name) + '</span></span><span class="small muted">' + b.active + ' soal</span></label>';
       }).join('') : '<p class="muted">Belum ada soal. Impor dulu di tab Soal.</p>') + '<p class="small muted" id="poolinfo"></p></div>' +
+      (ST.sessions.length ? '<div class="col" style="gap:10px"><label class="checkrow"><span class="row row-c" style="gap:12px;flex-wrap:nowrap"><input type="checkbox" name="exclude" data-change="pool-calc"><span class="bold">Kecualikan soal dari sesi sebelumnya</span></span></label>' +
+        '<div class="col" id="exwrap" style="gap:8px;display:none"><span class="small muted">Soal yang pernah dipakai di sesi yang dicentang tidak akan muncul lagi.</span>' +
+        ST.sessions.map(function (s) {
+          return '<label class="checkrow"><span class="row row-c" style="gap:12px;flex-wrap:nowrap"><input type="checkbox" name="exsess" value="' + s.id + '" data-change="pool-calc" checked><span class="bold">' + esc(s.title) + '</span></span><span class="small muted">' + s.total + ' soal</span></label>';
+        }).join('') + '</div></div>' : '') +
       '<div class="row"><div class="field grow" style="flex:1 1 150px"><label for="jml">Jumlah soal</label><input id="jml" name="count" class="input" type="number" min="1" max="500" value="' + def + '" required></div>' +
       '<div class="field grow" style="flex:1 1 150px"><label for="tmr">Timer (menit, kosong = tanpa timer)</label><input id="tmr" name="timer" class="input" type="number" min="1" max="600" placeholder="tanpa timer"></div></div>' +
       '<div class="col" style="gap:8px"><span class="label">Kapan benar/salah dan kunci ditampilkan</span><div class="seg">' +
@@ -83,11 +88,28 @@
     A.setMain(html);
     H['pool-calc']();
   }
+  var poolSeq = 0;
+  function exSessions() {
+    var ex = document.querySelector('input[name=exclude]');
+    var w = document.getElementById('exwrap'); if (w) w.style.display = ex && ex.checked ? '' : 'none';
+    if (!ex || !ex.checked) return [];
+    return Array.prototype.map.call(document.querySelectorAll('input[name=exsess]:checked'), function (c) { return c.value; });
+  }
   H['pool-calc'] = function () {
     var info = document.getElementById('poolinfo'); if (!info) return;
-    var n = 0, k = 0;
-    document.querySelectorAll('input[name=bank]').forEach(function (c) { if (c.checked) { n += +c.dataset.n; k++; } });
-    info.textContent = k ? 'Tersedia ' + n + ' soal dari ' + k + ' file yang dipilih.' : 'Pilih minimal satu file/bidang.';
+    var n = 0, k = 0, ids = [];
+    document.querySelectorAll('input[name=bank]').forEach(function (c) { if (c.checked) { n += +c.dataset.n; k++; ids.push(c.value); } });
+    var ex = exSessions();
+    var jm = document.getElementById('jml'); if (jm && !ex.length) jm.max = 500;
+    if (!k) { info.textContent = 'Pilih minimal satu file/bidang.'; return; }
+    if (!ex.length) { info.textContent = 'Tersedia ' + n + ' soal dari ' + k + ' file yang dipilih.'; return; }
+    var my = ++poolSeq;
+    info.textContent = 'Menghitung soal yang tersedia...';
+    Api.call('adm_pool_count', { p_bank_ids: ids, p_exclude_sessions: ex }).then(function (r) {
+      if (my !== poolSeq) return;
+      info.textContent = 'Tersedia ' + r.available + ' soal dari ' + k + ' file yang dipilih (' + r.excluded + ' dikecualikan karena sudah dipakai).';
+      if (jm) jm.max = Math.max(1, Math.min(500, r.available));
+    }).catch(function (e) { if (my === poolSeq) info.textContent = e.message; });
   };
   H['fb-pick'] = function (el) {
     el.closest('.seg').querySelectorAll('label').forEach(function (l) { l.classList.toggle('on', l.contains(el)); });
@@ -112,7 +134,8 @@
     try {
       await Api.call('adm_create_session', {
         p_title: form.elements.title.value, p_bank_ids: banks, p_count: parseInt(form.elements.count.value, 10),
-        p_timer: timer ? parseInt(timer, 10) : null, p_feedback: fb
+        p_timer: timer ? parseInt(timer, 10) : null, p_feedback: fb,
+        p_exclude_sessions: exSessions()
       });
       A.toast('Sesi dibuat. Peserta bisa langsung mengerjakan.');
       sesiTab();
