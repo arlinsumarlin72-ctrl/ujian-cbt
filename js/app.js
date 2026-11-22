@@ -223,7 +223,7 @@
       : s.started ? '<span class="badge b-warn">Sedang dikerjakan</span>'
       : s.status === 'open' ? '<span class="badge b-info">Terbuka</span>' : '<span class="badge b-bad">Ditutup</span>';
     return '<div class="session"><div><h3>' + esc(s.title) + '</h3><div class="meta"><span>' + s.total + ' soal</span><span>' +
-      (s.timer_minutes ? s.timer_minutes + ' menit' : 'Tanpa timer') + '</span><span>' + esc(fbLabel(s.feedback_mode)) + '</span>' +
+      (s.timer_minutes ? s.timer_minutes + ' menit' + (/^[0-9]+s?$/.test(s.feedback_mode || '') ? ' per bagian' : '') : 'Tanpa timer') + '</span><span>' + esc(fbLabel(s.feedback_mode)) + '</span>' +
       (s.lock_mode === 'locked' ? '<span>Bagian dibuka admin satu per satu</span>' : '') + (s.allow_pause ? '<span>Boleh jeda</span>' : '') +
       (s.ketat ? '<span class="badge b-warn">Mode ketat</span>' : '') +
       '<span>' + s.finished + ' peserta selesai</span></div></div><div class="row row-c">' + badge + action + '</div></div>';
@@ -271,13 +271,18 @@
       elapsed0: d.elapsed || 0, t0: Date.now(), discussing: !!d.session.discussing, paused: !!d.paused, navFilter: '',
       away: null, fsSeen: false, vchain: Promise.resolve(),
       times: d.times || {}, tdirty: false, notes: d.notes || {}, noteOpen: {}, peers: {}, warned: {},
+      blk: d.blk, blk_start: d.blk_start, bp: d.bp || null, flow: null, flowAt: 0,
       elim: lsGet('elim', id, {}), hl: lsGet('hl', id, {}), hlOn: false, saveFail: false, offline: false
     };
     var first = E.qs.findIndex(function (q) { return !q.locked && !E.answers[q.id]; });
     E.idx = first < 0 ? 0 : first;
-    if (E.session.timer_minutes) {
+    if (E.session.timer_minutes && modeInfo(E.session.feedback_mode).kind !== 'block') {
       var left0 = E.session.timer_minutes * 60 - E.elapsed0;
       [600, 300, 60].forEach(function (t) { if (left0 <= t) E.warned[t] = true; });
+    }
+    if (S.me && S.me.role === 'admin' && E.session.kind !== 'latihan') {
+      try { E.flow = await Api.call('adm_flow_state', { p_session: id }); E.flowAt = Date.now(); } catch (e) { /* abaikan */ }
+      if (!ok() || S.exam !== E) return;
     }
 
     var rid = revealIds(E);
@@ -378,12 +383,12 @@
     E.finBusy = true; renderExam();
     try {
       clearTimeout(E.saveT); E.dirty = false;
-      var r = await Api.call('app_finalize', { p_session: E.id, p_answers: E.answers, p_flags: E.flags });
-      E.locked = r.locked;
+      var r = await Api.call('app_finalize', { p_session: E.id, p_answers: E.answers, p_flags: E.flags, p_upto: nb.end + 1 });
+      E.locked = r.locked; E.blk = r.blk; E.blk_start = r.blk_start;
       flushTimes(E);
-      var rid = revealIds(E).filter(function (id) { return !E.keys[id]; });
-      if (rid.length) Object.assign(E.keys, await Api.call('app_reveal', { p_session: E.id, p_qids: rid }));
       E.notified = nb.start;
+      E.finBusy = false;
+      await refreshExam(null);
       toast('Blok ' + (nb.start + 1) + ' sampai ' + (nb.end + 1) + ' diselesaikan.');
     } catch (err) { toast(err.message, true); }
     E.finBusy = false;
@@ -409,6 +414,18 @@
     if (d.submitted) { toast('Jawabanmu sudah dikumpulkan oleh admin.'); var sid = E.id; S.exam = null; go('#/hasil/' + sid); return; }
     if (d.elapsed != null) { E.elapsed0 = d.elapsed; E.t0 = Date.now(); }
     var changed = false;
+    if (d.bp !== undefined) E.bp = d.bp;
+    if (d.blk !== undefined) { if (d.blk !== E.blk) changed = true; E.blk = d.blk; E.blk_start = d.blk_start; }
+    if (d.locked != null && d.locked > E.locked) {
+      // waktu bagian habis: server sudah menyelesaikan bagian itu
+      await refreshExam('Waktu bagian habis. Jawabanmu dikunci dan kunci jawaban dibuka.', true);
+      if (S.exam === E && E.locked >= E.qs.length && E.session.timer_minutes && modeInfo(E.session.feedback_mode).kind === 'block') doSubmit(true);
+      return;
+    }
+    if (S.me && S.me.role === 'admin' && E.session.kind !== 'latihan') {
+      try { E.flow = await Api.call('adm_flow_state', { p_session: E.id }); E.flowAt = Date.now(); } catch (e) { /* abaikan */ }
+      if (S.exam !== E) return;
+    }
     if (!!d.discussing !== E.discussing) {
       E.discussing = !!d.discussing; changed = true;
       beep();
@@ -419,7 +436,7 @@
     if (!!d.paused !== E.paused) { E.paused = !!d.paused; changed = true; }
     if (d.lock_mode === 'locked' && d.unlocked_n !== E.session.unlocked_n) { await refreshExam('Bagian berikutnya sudah dibuka admin.', true); return; }
     if (d.rev !== E.session.rev) { await refreshExam(d.notice || 'Ada soal yang diganti oleh admin.'); return; }
-    if (changed) { renderExam(); awayCheck(); }
+    if (changed) { renderExam(); awayCheck(); } else updateBars(E);
     peersFor(E);
   }
   async function refreshExam(notice, soft) {
@@ -432,6 +449,7 @@
     clearTimeout(E.saveT); E.dirty = false;
     E.session = d.session; E.discussing = !!d.session.discussing; E.paused = !!d.paused;
     E.elapsed0 = d.elapsed || 0; E.t0 = Date.now(); E.viol = d.viol || E.viol;
+    E.blk = d.blk; E.blk_start = d.blk_start; E.bp = d.bp || null;
     E.qs = d.questions; E.answers = d.answers || {}; E.flags = d.flags || {}; E.keys = {}; E.locked = d.locked || 0; E.revealed = d.revealed || [];
     E.notes = Object.assign({}, d.notes || {}, E.notes); E.peers = {};
     if (E.idx > E.qs.length - 1) E.idx = E.qs.length - 1;
@@ -482,8 +500,28 @@
       var q0 = E.qs[E.idx];
       if (q0 && !q0.locked && E.idx >= E.locked && !E.keys[q0.id]) { E.times[q0.id] = (E.times[q0.id] || 0) + 1; E.tdirty = true; }
     }
+    var xc = document.getElementById('xclock');
+    if (xc && E.flow && E.flow.discussing) xc.textContent = clock((E.flow.since || 0) + (Date.now() - E.flowAt) / 1000);
     var el = document.getElementById('timer'); if (!el) return;
     var used = elapsedNow(E), tm = E.session.timer_minutes, fz = frozenClock(E);
+    if (tm && modeInfo(E.session.feedback_mode).kind === 'block') {
+      // timer berlaku untuk tiap bagian: jam bagian dimulai saat bagian terbuka dan tidak berjalan saat diskusi/jeda
+      var tot = E.qs.length, bsec = tm * 60;
+      if (E.blk == null) { el.textContent = E.locked >= tot ? 'Semua bagian selesai' : 'Menunggu bagian berikutnya'; el.className = 'timer' + (fz ? ' paused' : ''); return; }
+      if (E.blk_start == null) { el.textContent = 'Menunggu bagian ' + E.blk + ' dibuka'; el.className = 'timer paused'; return; }
+      var bl = E.blk_start + bsec - used;
+      el.textContent = (fz ? 'Dijeda ' : 'Bagian ' + E.blk + ' · sisa ') + clock(bl);
+      el.className = 'timer' + (fz ? ' paused' : (bl <= Math.min(300, bsec * 0.25) ? ' low' : (bl <= Math.min(600, bsec * 0.5) ? ' warn' : '')));
+      if (!fz && !E.submitting) [600, 300, 60].forEach(function (t) {
+        var wk = E.blk + ':' + t;
+        if (t < bsec * 0.9 && bl <= t && bl > 0 && !E.warned[wk]) { E.warned[wk] = true; beep(); toast('Sisa waktu bagian ' + E.blk + ': ' + (t / 60) + ' menit.', t <= 60); }
+      });
+      if (bl <= 0 && !fz && !E.submitting && !E.blkBusy) {
+        E.blkBusy = true; setTimeout(function () { E.blkBusy = false; }, 3000);
+        pollRev();
+      }
+      return;
+    }
     if (tm) {
       var left = tm * 60 - used;
       el.textContent = (fz ? 'Dijeda ' : 'Sisa waktu ') + clock(left);
@@ -564,7 +602,7 @@
     var mi = modeInfo(E.session.feedback_mode), n = mi.kind === 'block' ? mi.n : 0;
     var part = n ? Math.floor(E.idx / n) + 1 : null;
     return '<div class="lockcard">' + LOCK_SVG + '<h3>' + (part ? 'Bagian ' + part : 'Soal ini') + ' masih terkunci</h3>' +
-      '<p class="muted">Admin membuka bagian ini setelah diskusi bagian sebelumnya selesai. Layar ini otomatis terbuka begitu admin membukanya, tidak perlu memuat ulang.</p>' +
+      '<p class="muted">Bagian ini terbuka setelah bagian sebelumnya selesai' + (E.session.lock_mode === 'locked' ? ' dan admin membukanya (biasanya setelah diskusi)' : '') + '. Layar ini otomatis terbuka, tidak perlu memuat ulang.</p>' +
       (E.discussing ? '<p class="bold" style="color:var(--primary-dark)">Diskusi sedang berlangsung. Waktu dihentikan.</p>' : '') + '</div>';
   }
 
@@ -576,6 +614,55 @@
   }
   H['enter-fs'] = function () { requestFs(); };
 
+  /* Status bagian untuk semua peserta + kendali diskusi untuk admin yang ikut mengerjakan */
+  function partInner(E) {
+    var mi = modeInfo(E.session.feedback_mode);
+    if (mi.kind !== 'block' || E.session.kind === 'latihan') return '';
+    var n = mi.n, total = E.qs.length, parts = Math.ceil(total / n), curP = Math.min(parts, Math.floor(E.locked / n) + 1);
+    var firstQ = E.qs[Math.floor(E.locked / n) * n];
+    var txt;
+    if (E.locked >= total) txt = '<b>Semua bagian selesai.</b> Tekan Kumpulkan.';
+    else if (firstQ && firstQ.locked) txt = '<b>Bagian ' + (curP - 1) + ' selesai.</b> Menunggu admin memulai diskusi dan membuka bagian ' + curP + '.';
+    else txt = '<b>Bagian ' + curP + ' dari ' + parts + '</b> (soal ' + ((curP - 1) * n + 1) + '-' + Math.min(curP * n, total) + ')';
+    if (E.bp && E.bp.all > 1) txt += ' · Yang sudah menyelesaikan bagian ' + E.bp.blk + ': <b>' + E.bp.done + ' dari ' + E.bp.all + '</b> peserta';
+    return txt;
+  }
+  function adminBarInner(E) {
+    var f = E.flow;
+    if (!f) return '<span class="small">Memuat kendali admin...</span>';
+    var n = f.block, locked = f.lock_mode === 'locked' && n, hasNext = locked && f.unlocked_n < f.total;
+    var nextNo = locked ? Math.floor(f.unlocked_n / n) + 1 : 0, a = f.unlocked_n + 1, b = Math.min(f.total, f.unlocked_n + (n || 0)), btns = '';
+    if (!f.discussing) {
+      btns += '<button class="btn btn-sm btn-primary" type="button" data-act="xflow" data-a="start">Mulai diskusi</button>';
+      if (hasNext) btns += '<button class="btn btn-sm" type="button" data-act="xflow" data-a="unlock">Buka bagian ' + nextNo + ' (soal ' + a + '-' + b + ') tanpa diskusi</button>';
+    } else {
+      btns += '<button class="btn btn-sm' + (hasNext ? '' : ' btn-primary') + '" type="button" data-act="xflow" data-a="end" data-u="0">Selesai diskusi</button>';
+      if (hasNext) btns += '<button class="btn btn-sm btn-primary" type="button" data-act="xflow" data-a="end" data-u="1">Selesai diskusi dan buka bagian ' + nextNo + ' (soal ' + a + '-' + b + ')</button>';
+    }
+    return '<span class="bold">Kendali admin</span><span class="small">' + (f.discussing ? 'Diskusi berlangsung <b id="xclock">' + clock((f.since || 0) + (Date.now() - E.flowAt) / 1000) + '</b>, waktu semua peserta berhenti' : 'Tidak sedang diskusi') +
+      (locked ? ' · bagian terbuka: ' + Math.min(Math.ceil(f.unlocked_n / n), Math.ceil(f.total / n)) + ' dari ' + Math.ceil(f.total / n) : '') + '</span>' + btns + '<a class="btn btn-sm" href="#/admin/sesi">Panel peserta</a>';
+  }
+  function updateBars(E) {
+    var p = document.getElementById('partbar'); if (p) { var t = partInner(E); p.innerHTML = t; p.classList.toggle('hidden', !t); }
+    var a = document.getElementById('adminbar'); if (a) a.innerHTML = adminBarInner(E);
+  }
+  H.xflow = async function (el) {
+    var E = S.exam; if (!E || !S.me || S.me.role !== 'admin') return;
+    var act = el.dataset.a, u = el.dataset.u === '1';
+    if (act === 'unlock') {
+      var ok = await confirmDialog('Buka bagian berikutnya?', 'Semua peserta langsung bisa mengerjakan bagian berikutnya tanpa diskusi.', 'Buka', false);
+      if (!ok) return;
+    }
+    el.disabled = true;
+    try {
+      await Api.call('adm_flow', { p_session: E.id, p_action: act, p_unlock: u });
+      toast(act === 'start' ? 'Diskusi dimulai. Waktu semua peserta berhenti.' : act === 'end' ? (u ? 'Diskusi selesai dan bagian berikutnya dibuka.' : 'Diskusi selesai. Waktu berjalan lagi.') : 'Bagian berikutnya dibuka.');
+      E.flow = await Api.call('adm_flow_state', { p_session: E.id }); E.flowAt = Date.now();
+      await pollRev();
+      if (S.exam === E) updateBars(E);
+    } catch (e) { toast(e.message, true); el.disabled = false; }
+  };
+
   function headHtml(E, total) {
     return '<div class="exam-head"><div class="col" style="gap:0"><span class="small bold muted">' + (E.session.kind === 'latihan' ? 'Latihan pribadi' : 'Sesi') + '</span><span class="bold" style="font-size:18px">' + esc(E.session.title) + '</span></div>' +
       '<div class="row row-c" style="gap:14px"><span class="bold">Soal ' + (E.idx + 1) + ' dari ' + total + '</span>' +
@@ -584,7 +671,9 @@
       '<span class="small muted" id="savestate" role="status">' + esc(E.saveState) + '</span>' +
       (E.session.allow_pause && !E.discussing && !E.paused ? '<button class="btn btn-sm" type="button" data-act="pause" title="Hentikan waktu sebentar. Soal disembunyikan selama jeda.">Jeda</button>' : '') +
       '<button class="btn btn-primary" type="button" data-act="exam-submit"' + (E.submitting ? ' disabled' : '') + '>Kumpulkan</button></div></div>' +
-      '<div id="savebanner" class="alert-bar hidden" role="alert"></div>';
+      '<div id="savebanner" class="alert-bar hidden" role="alert"></div>' +
+      (E.paused ? '' : '<div id="partbar" class="part-bar' + (partInner(E) ? '' : ' hidden') + '" role="status">' + partInner(E) + '</div>' +
+        (S.me && S.me.role === 'admin' && E.session.kind !== 'latihan' ? '<div id="adminbar" class="admin-bar">' + adminBarInner(E) + '</div>' : ''));
   }
 
   function stemHtml(E, q) {

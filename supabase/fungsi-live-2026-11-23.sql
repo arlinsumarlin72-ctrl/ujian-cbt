@@ -1,4 +1,4 @@
--- Salinan fungsi database yang SEDANG berjalan (diambil 2026-11-23 setelah patch-2026-11-23b-belajar-ulang.sql).
+-- Salinan fungsi database yang SEDANG berjalan (diambil 2026-11-23 setelah patch-2026-11-23c-timer-per-bagian.sql).
 -- Ini sumber kebenaran fungsi. schema.sql lama tidak lengkap: JANGAN dijalankan ulang di database yang sudah berjalan.
 
 CREATE OR REPLACE FUNCTION public._admin(p_token uuid)
@@ -14,6 +14,76 @@ begin
     raise exception 'Fitur ini khusus admin.' using errcode = '42501';
   end if;
   return r;
+end $function$
+;
+
+CREATE OR REPLACE FUNCTION public._blk_info(s sessions, a attempts)
+ RETURNS jsonb
+ LANGUAGE sql
+ STABLE
+AS $function$
+  select case
+    when _bsize(s) is null or s.timer_minutes is null or a.locked_n >= cardinality(s.question_ids)
+      then jsonb_build_object('blk', null, 'blk_start', null)
+    else jsonb_build_object('blk', a.locked_n / _bsize(s) + 1,
+                            'blk_start', (a.block_starts ->> (a.locked_n / _bsize(s) + 1)::text)::int)
+  end
+$function$
+;
+
+CREATE OR REPLACE FUNCTION public._blk_peers(s sessions, a attempts)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ STABLE
+AS $function$
+declare n int := _bsize(s); total int := cardinality(s.question_ids); re int;
+begin
+  if n is null or s.owner is not null then return null; end if;
+  if a.locked_n > 0 and s.lock_mode = 'locked' and a.locked_n >= s.unlocked_n then re := a.locked_n;
+  else re := least((a.locked_n / n + 1) * n, total); end if;
+  return (select jsonb_build_object('done', count(*) filter (where t.submitted_at is not null or t.locked_n >= re),
+                                    'all', count(*), 'blk', (re + n - 1) / n)
+            from attempts t where t.session_id = s.id);
+end $function$
+;
+
+CREATE OR REPLACE FUNCTION public._blk_sync(p_session uuid, p_profile uuid)
+ RETURNS void
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions'
+AS $function$
+declare s sessions; a attempts; n int; total int; dl int; el int; k int; st int; carry int; avail boolean; ln int; bs jsonb;
+begin
+  select * into s from sessions where id = p_session;
+  if not found then return; end if;
+  n := _bsize(s);
+  if n is null or s.timer_minutes is null then return; end if;
+  select * into a from attempts where session_id = p_session and profile_id = p_profile and submitted_at is null for update;
+  if not found then return; end if;
+  total := cardinality(s.question_ids); dl := s.timer_minutes * 60; el := _elapsed(s, a);
+  ln := a.locked_n; bs := a.block_starts;
+  loop
+    exit when ln >= total;
+    k := ln / n + 1;
+    avail := s.lock_mode <> 'locked' or ((k - 1) * n) < s.unlocked_n;
+    exit when not avail;
+    st := (bs ->> (k::text))::int;
+    if st is null then
+      st := coalesce(carry, el);
+      bs := bs || jsonb_build_object(k::text, st);
+    end if;
+    carry := null;
+    if el >= st + dl then
+      ln := least(ln + n, total);
+      carry := st + dl;
+    else
+      exit;
+    end if;
+  end loop;
+  if ln <> a.locked_n or bs <> a.block_starts then
+    update attempts set locked_n = ln, block_starts = bs where id = a.id;
+  end if;
 end $function$
 ;
 
@@ -132,6 +202,18 @@ begin
   end if;
   return r;
 end $function$
+;
+
+CREATE OR REPLACE FUNCTION public._open_for(s sessions, a attempts)
+ RETURNS integer
+ LANGUAGE sql
+ STABLE
+AS $function$
+  select case
+    when _bsize(s) is not null and s.timer_minutes is not null
+      then least(coalesce(_open_n(s), cardinality(s.question_ids)), (a.locked_n / _bsize(s) + 1) * _bsize(s), cardinality(s.question_ids))
+    else _open_n(s) end
+$function$
 ;
 
 CREATE OR REPLACE FUNCTION public._open_n(s sessions)
@@ -886,7 +968,7 @@ CREATE OR REPLACE FUNCTION public.adm_submit_attempts(p_token uuid, p_session uu
  SECURITY DEFINER
  SET search_path TO 'public', 'extensions'
 AS $function$
-declare s sessions; a attempts; v_score int; v_time int; c int := 0;
+declare s sessions; a attempts; v_score int; v_time int; v_cap int; c int := 0;
 begin
   perform _admin(p_token);
   select * into s from sessions where id = p_session;
@@ -894,7 +976,10 @@ begin
   for a in select * from attempts where session_id = p_session and submitted_at is null and (p_profile is null or profile_id = p_profile) for update loop
     select count(*) into v_score from unnest(s.question_ids) as u(qid) join question_keys k on k.question_id = u.qid where a.answers ->> (u.qid::text) = k.answer;
     v_time := _elapsed(s, a);
-    if s.timer_minutes is not null and v_time > s.timer_minutes * 60 then v_time := s.timer_minutes * 60; end if;
+    if s.timer_minutes is not null then
+      v_cap := s.timer_minutes * 60 * case when _bsize(s) is not null then ceil(cardinality(s.question_ids)::numeric / _bsize(s))::int else 1 end;
+      if v_time > v_cap then v_time := v_cap; end if;
+    end if;
     update attempts set submitted_at = now(), score = v_score, time_taken = v_time, locked_n = cardinality(s.question_ids) where id = a.id;
     c := c + 1;
   end loop;
@@ -1062,7 +1147,7 @@ begin
 end $function$
 ;
 
-CREATE OR REPLACE FUNCTION public.app_finalize(p_token uuid, p_session uuid, p_answers jsonb, p_flags jsonb)
+CREATE OR REPLACE FUNCTION public.app_finalize(p_token uuid, p_session uuid, p_answers jsonb, p_flags jsonb, p_upto integer DEFAULT NULL::integer)
  RETURNS jsonb
  LANGUAGE plpgsql
  SECURITY DEFINER
@@ -1071,7 +1156,7 @@ AS $function$
 declare r profiles; s sessions; a attempts; n int; total int; nxt int;
 begin
   r := _me(p_token);
-  select * into s from sessions where id = p_session;
+  select * into s from sessions where id = p_session and (owner is null or owner = r.id);
   if not found then raise exception 'Sesi tidak ditemukan.'; end if;
   if s.feedback_mode !~ '^[0-9]' then raise exception 'Sesi ini tidak memakai blok.'; end if;
   n := regexp_replace(s.feedback_mode, 's$', '')::int;
@@ -1080,12 +1165,17 @@ begin
   select * into a from attempts where session_id = s.id and profile_id = r.id for update;
   if not found then raise exception 'Kamu belum memulai sesi ini.'; end if;
   if a.submitted_at is not null then return jsonb_build_object('locked', total); end if;
+  if p_upto is not null and a.locked_n >= p_upto then
+    return jsonb_build_object('locked', a.locked_n) || _blk_info(s, a);
+  end if;
   if s.lock_mode = 'locked' and a.locked_n >= s.unlocked_n then
     raise exception 'Bagian berikutnya belum dibuka admin.';
   end if;
   nxt := least(a.locked_n + n, total);
   update attempts set locked_n = greatest(locked_n, nxt) where id = a.id;
-  return jsonb_build_object('locked', greatest(a.locked_n, nxt));
+  perform _blk_sync(s.id, r.id);
+  select * into a from attempts where id = a.id;
+  return jsonb_build_object('locked', a.locked_n) || _blk_info(s, a);
 end $function$
 ;
 
@@ -1452,6 +1542,7 @@ begin
   r := _me(p_token);
   select * into s from sessions where id = p_session and (owner is null or owner = r.id);
   if not found then return jsonb_build_object('rev', 0, 'notice', null, 'submitted', false); end if;
+  perform _blk_sync(p_session, r.id);
   select * into a from attempts where session_id = p_session and profile_id = r.id;
   v_has := found;
   if v_has and a.submitted_at is null then
@@ -1461,7 +1552,10 @@ begin
     'submitted', coalesce(v_has and a.submitted_at is not null, false),
     'discussing', _discussing(s), 'unlocked_n', s.unlocked_n, 'lock_mode', s.lock_mode,
     'paused', v_has and _is_paused(a),
-    'elapsed', case when v_has and a.submitted_at is null then _elapsed(s, a) end);
+    'locked', case when v_has then a.locked_n end,
+    'bp', case when v_has then _blk_peers(s, a) end,
+    'elapsed', case when v_has and a.submitted_at is null then _elapsed(s, a) end)
+    || case when v_has and a.submitted_at is null then _blk_info(s, a) else '{}'::jsonb end;
 end $function$
 ;
 
@@ -1477,6 +1571,7 @@ begin
   r := _me(p_token);
   select * into s from sessions where id = p_session;
   if not found then raise exception 'Sesi tidak ditemukan.'; end if;
+  perform _blk_sync(p_session, r.id);
   select * into a from attempts where session_id = s.id and profile_id = r.id;
   if not found then raise exception 'Kamu belum memulai sesi ini.'; end if;
 
@@ -1500,7 +1595,6 @@ begin
     end if;
   end loop;
 
-  -- mode "satu per satu": ingat kunci yang sudah dibuka supaya tidak hilang saat halaman dimuat ulang
   if a.submitted_at is null and s.feedback_mode ~ 's$' and cardinality(v_new) > 0 then
     update attempts
        set revealed = (select coalesce(array_agg(distinct x), '{}') from unnest(a.revealed || v_new) as x)
@@ -1535,11 +1629,12 @@ begin
   if jsonb_typeof(p_answers) <> 'object' or jsonb_typeof(p_flags) <> 'object' then
     raise exception 'Data tidak valid.';
   end if;
+  perform _blk_sync(p_session, r.id);
   select * into a from attempts where session_id = p_session and profile_id = r.id and submitted_at is null for update;
   if found then
     select * into s from sessions where id = p_session;
-    v_ans := _strip_after(s.question_ids, _open_n(s), _keep_locked(s.question_ids, a.locked_n, a.answers, p_answers));
-    if _discussing(s) or _is_paused(a) then v_ans := a.answers; end if;   -- saat diskusi / jeda jawaban tidak berubah
+    v_ans := _strip_after(s.question_ids, _open_for(s, a), _keep_locked(s.question_ids, a.locked_n, a.answers, p_answers));
+    if _discussing(s) or _is_paused(a) then v_ans := a.answers; end if;
     update attempts
        set answers = v_ans,
            flags   = _keep_locked(s.question_ids, a.locked_n, a.flags, p_flags)
@@ -1613,7 +1708,10 @@ begin
     return jsonb_build_object('submitted', true);
   end if;
 
-  v_open := _open_n(s);
+  perform _blk_sync(s.id, r.id);
+  select * into a from attempts where id = a.id;
+
+  v_open := _open_for(s, a);
   select coalesce(jsonb_agg(
            case when v_open is not null and u.ord > v_open
                 then jsonb_build_object('id', q.id, 'no', u.ord, 'locked', true)
@@ -1641,8 +1739,9 @@ begin
     'paused', _is_paused(a),
     'notes', coalesce((select jsonb_object_agg(n.question_id::text, n.body) from notes n
                         where n.profile_id = r.id and n.question_id = any(s.question_ids)), '{}'::jsonb),
+    'bp', _blk_peers(s, a),
     'elapsed', _elapsed(s, a)
-  );
+  ) || _blk_info(s, a);
 end $function$
 ;
 
@@ -1652,16 +1751,17 @@ CREATE OR REPLACE FUNCTION public.app_submit(p_token uuid, p_session uuid, p_ans
  SECURITY DEFINER
  SET search_path TO 'public', 'extensions'
 AS $function$
-declare r profiles; s sessions; a attempts; v_score int; v_time int;
+declare r profiles; s sessions; a attempts; v_score int; v_time int; v_cap int;
 begin
   r := _me(p_token);
   select * into s from sessions where id = p_session;
   if not found then raise exception 'Sesi tidak ditemukan.'; end if;
+  perform _blk_sync(p_session, r.id);
   select * into a from attempts where session_id = s.id and profile_id = r.id for update;
   if not found then raise exception 'Kamu belum memulai sesi ini.'; end if;
   if a.submitted_at is not null then return jsonb_build_object('ok', true, 'already', true); end if;
 
-  p_answers := _strip_after(s.question_ids, _open_n(s),
+  p_answers := _strip_after(s.question_ids, _open_for(s, a),
       _keep_locked(s.question_ids, a.locked_n, a.answers, case when jsonb_typeof(p_answers) = 'object' then p_answers else a.answers end));
   p_flags   := _keep_locked(s.question_ids, a.locked_n, a.flags, case when jsonb_typeof(p_flags) = 'object' then p_flags else a.flags end);
 
@@ -1671,8 +1771,9 @@ begin
   where p_answers ->> (u.qid::text) = k.answer;
 
   v_time := _elapsed(s, a);
-  if s.timer_minutes is not null and v_time > s.timer_minutes * 60 then
-    v_time := s.timer_minutes * 60;
+  if s.timer_minutes is not null then
+    v_cap := s.timer_minutes * 60 * case when _bsize(s) is not null then ceil(cardinality(s.question_ids)::numeric / _bsize(s))::int else 1 end;
+    if v_time > v_cap then v_time := v_cap; end if;
   end if;
 
   update attempts

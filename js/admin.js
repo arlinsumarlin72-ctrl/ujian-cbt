@@ -67,7 +67,7 @@
           return '<label class="checkrow"><span class="row row-c" style="gap:12px;flex-wrap:nowrap"><input type="checkbox" name="exsess" value="' + s.id + '" data-change="pool-calc" checked><span class="bold">' + esc(s.title) + '</span></span><span class="small muted">' + s.total + ' soal</span></label>';
         }).join('') + '</div></div>' : '') +
       '<div class="row"><div class="field grow" style="flex:1 1 150px"><label for="jml">Jumlah soal</label><input id="jml" name="count" class="input" type="number" min="1" max="500" value="' + def + '" required></div>' +
-      '<div class="field grow" style="flex:1 1 150px"><label for="tmr">Timer (menit, kosong = tanpa timer)</label><input id="tmr" name="timer" class="input" type="number" min="1" max="600" placeholder="tanpa timer"></div></div>' +
+      '<div class="field grow" style="flex:1 1 150px"><label for="tmr">Timer (menit, kosong = tanpa timer)</label><input id="tmr" name="timer" class="input" type="number" min="1" max="600" placeholder="tanpa timer"><span class="small muted" id="tmrhint">Berlaku untuk seluruh sesi.</span></div></div>' +
       '<div class="col" style="gap:8px"><span class="label">Kapan benar/salah dan kunci ditampilkan</span><div class="seg">' +
       [['each', 'Per nomor'], ['10', 'Per 10'], ['20', 'Per 20'], ['custom', 'Atur sendiri'], ['end', 'Di akhir']].map(function (f) {
         return '<label class="' + (f[0] === 'end' ? 'on' : '') + '"><input type="radio" name="fb" value="' + f[0] + '"' + (f[0] === 'end' ? ' checked' : '') + ' data-change="fb-pick">' + f[1] + '</label>';
@@ -83,7 +83,7 @@
       '<div class="card grow" style="flex:1 1 460px"><h2 class="bold" style="font-size:20px">Daftar sesi</h2>' +
       (ST.sessions.length ? '<div class="scroll-x"><table class="table"><thead><tr><th>Sesi</th><th>Soal</th><th>Selesai</th><th>Status</th><th>Aksi</th></tr></thead><tbody>' +
         ST.sessions.map(function (s) {
-          return '<tr><td><span class="bold">' + esc(s.title) + '</span><div class="small muted">' + (s.timer_minutes ? s.timer_minutes + ' menit' : 'tanpa timer') + ' · ' + esc(A.fbLabel(s.feedback_mode)) + '</div>' +
+          return '<tr><td><span class="bold">' + esc(s.title) + '</span><div class="small muted">' + (s.timer_minutes ? s.timer_minutes + ' menit' + (/^[0-9]+s?$/.test(s.feedback_mode || '') ? ' per bagian' : '') : 'tanpa timer') + ' · ' + esc(A.fbLabel(s.feedback_mode)) + '</div>' +
             ((s.lock_mode === 'locked' || s.ketat || s.discussing || s.allow_pause) ? '<div class="row" style="gap:6px;margin-top:4px">' + (s.lock_mode === 'locked' ? '<span class="badge b-info">Terkunci per bagian</span>' : '') + (s.ketat ? '<span class="badge b-warn">Mode ketat</span>' : '') + (s.allow_pause ? '<span class="badge b-info">Boleh jeda</span>' : '') + (s.discussing ? '<span class="badge b-info">Sedang diskusi</span>' : '') + '</div>' : '') + '</td>' +
             '<td>' + s.total + '</td><td>' + s.finished + (s.ongoing ? ' <span class="small muted">(+' + s.ongoing + ' berjalan)</span>' : '') + '</td>' +
             '<td>' + (s.status === 'open' ? '<span class="badge b-info">Terbuka</span>' : '<span class="badge b-bad">Ditutup</span>') + '</td>' +
@@ -124,6 +124,7 @@
     var show = (el.value === '10' || el.value === '20' || el.value === 'custom') ? '' : 'none';
     var rw = document.getElementById('rv-wrap'); if (rw) rw.style.display = show;
     var lw = document.getElementById('lk-wrap'); if (lw) lw.style.display = show;
+    var th = document.getElementById('tmrhint'); if (th) th.textContent = show === '' ? 'Kunci tampil per bagian, jadi timer berlaku untuk TIAP bagian (mis. 10 menit untuk 20 nomor), bukan seluruh sesi.' : 'Berlaku untuk seluruh sesi.';
   };
   H['rv-pick'] = function (el) {
     el.closest('.seg').querySelectorAll('label').forEach(function (l) { l.classList.toggle('on', l.contains(el)); });

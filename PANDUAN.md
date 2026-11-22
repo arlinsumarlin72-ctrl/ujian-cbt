@@ -22,6 +22,8 @@ window.APP_CONFIG = { SUPABASE_URL: 'https://xxxx.supabase.co', SUPABASE_ANON_KE
 1. Buka situs, **daftar duluan**: pendaftar pertama otomatis admin.
 2. Admin > Soal: unggah file soal + file kunci (docx/pdf/xlsx/csv/txt), periksa pratinjau, simpan.
 3. Admin > Sesi: pilih file, jumlah soal, timer, kapan kunci tampil. Soal diacak sekali, sama untuk semua peserta.
+   - **Timer**: bila kunci tampil per bagian, timer berlaku untuk TIAP bagian (mis. 10 menit untuk 20 nomor). Jam bagian dimulai saat bagian itu terbuka bagi peserta, berhenti saat diskusi/jeda, dan saat habis bagian otomatis diselesaikan (jawaban dikunci, kunci dibuka) lalu bagian berikutnya mulai. Tanpa pembagian bagian, timer berlaku untuk seluruh sesi.
+   - **Kendali di layar ujian**: admin yang ikut mengerjakan punya tombol mulai/selesai diskusi dan buka bagian langsung di layar ujian. Semua peserta melihat status bagian dan berapa teman yang sudah selesai.
    - **Per bagian (mis. per 20)**: pilih *Langsung lanjut* atau *Terkunci sampai admin membuka*. Pada mode terkunci, isi soal bagian lain tidak dikirim ke peserta.
    - **Diskusi**: di daftar sesi klik *Peserta dan diskusi*. *Mulai diskusi* menghentikan waktu semua peserta dan membekukan jawaban; *Selesai diskusi dan buka bagian berikutnya* menjalankan waktu lagi dan membuka bagian baru.
    - **Mode ketat**: peserta ujian layar penuh; pindah tab/aplikasi atau keluar layar penuh dicatat (waktu dan lama) dan terlihat admin. Pencatatan dihentikan saat diskusi.
