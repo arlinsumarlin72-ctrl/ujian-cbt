@@ -1,4 +1,4 @@
--- Salinan fungsi database yang SEDANG berjalan (diambil 2026-11-23 setelah patch-2026-11-23c-timer-per-bagian.sql).
+-- Salinan fungsi database yang SEDANG berjalan (diambil 2026-11-23 setelah patch-2026-11-23d-bantuan-diskusi.sql).
 -- Ini sumber kebenaran fungsi. schema.sql lama tidak lengkap: JANGAN dijalankan ulang di database yang sudah berjalan.
 
 CREATE OR REPLACE FUNCTION public._admin(p_token uuid)
@@ -102,6 +102,15 @@ CREATE OR REPLACE FUNCTION public._discussing(s sessions)
  STABLE
 AS $function$
   select exists (select 1 from jsonb_array_elements(s.discuss_log) d where d ->> 'e' is null)
+$function$
+;
+
+CREATE OR REPLACE FUNCTION public._dopen(s sessions)
+ RETURNS jsonb
+ LANGUAGE sql
+ STABLE
+AS $function$
+  select d from jsonb_array_elements(s.discuss_log) d where d ->> 'e' is null limit 1
 $function$
 ;
 
@@ -419,7 +428,8 @@ begin
   select coalesce(jsonb_agg(jsonb_build_object('no', u.ord, 'id', q.id, 'system', coalesce(b.system, b.name), 'file', b.name,
       'qtype', coalesce(q.qtype, 'Lainnya'), 'stem', q.stem,
       'image', q.image, 'options', q.options, 'key', k.answer, 'mine', a.answers ->> (q.id::text),
-      'flag', coalesce((a.flags ->> (q.id::text))::boolean, false)) order by u.ord), '[]'::jsonb)
+      'flag', coalesce((a.flags ->> (q.id::text))::boolean, false),
+      'expl', (select e.body from explanations e where e.question_id = q.id)) order by u.ord), '[]'::jsonb)
   into v
   from unnest(s.question_ids) with ordinality as u(qid, ord)
   join questions q on q.id = u.qid join banks b on b.id = q.bank_id
@@ -544,9 +554,11 @@ begin
    where t.session_id = s.id and t.submitted_at is null and t.locked_n < b0;
 
   select coalesce(jsonb_agg(jsonb_build_object(
-           'no', u.ord, 'sy', coalesce(b.system, b.name), 'ty', coalesce(q.qtype, 'Lainnya'),
+           'no', u.ord, 'id', q.id, 'sy', coalesce(b.system, b.name), 'ty', coalesce(q.qtype, 'Lainnya'),
            'stem', left(q.stem, 200), 'key', k.answer,
-           'n', st.n, 'ok', st.ok, 'd', st.d) order by u.ord), '[]'::jsonb) into v
+           'n', st.n, 'ok', st.ok, 'd', st.d, 'ok_names', st.ok_names,
+           'hands', (select count(*) from hand_votes h where h.session_id = s.id and h.question_id = q.id),
+           'expl', (select e.body from explanations e where e.question_id = q.id)) order by u.ord), '[]'::jsonb) into v
   from unnest(s.question_ids) with ordinality as u(qid, ord)
   join questions q on q.id = u.qid join banks b on b.id = q.bank_id
   left join question_keys k on k.question_id = q.id
@@ -555,8 +567,9 @@ begin
            (count(*) filter (where t.answers ->> (q.id::text) = k.answer))::int as ok,
            jsonb_build_object('A', count(*) filter (where t.answers ->> (q.id::text) = 'A'), 'B', count(*) filter (where t.answers ->> (q.id::text) = 'B'),
                               'C', count(*) filter (where t.answers ->> (q.id::text) = 'C'), 'D', count(*) filter (where t.answers ->> (q.id::text) = 'D'),
-                              'E', count(*) filter (where t.answers ->> (q.id::text) = 'E')) as d
-    from attempts t
+                              'E', count(*) filter (where t.answers ->> (q.id::text) = 'E')) as d,
+           coalesce(jsonb_agg(p.name order by p.name) filter (where t.answers ->> (q.id::text) = k.answer), '[]'::jsonb) as ok_names
+    from attempts t join profiles p on p.id = t.profile_id
     where t.session_id = s.id and (t.submitted_at is not null or t.locked_n >= b0)
   ) st
   where u.ord between a0 and b0;
@@ -676,31 +689,51 @@ begin
 end $function$
 ;
 
-CREATE OR REPLACE FUNCTION public.adm_flow(p_token uuid, p_session uuid, p_action text, p_unlock boolean DEFAULT false)
+CREATE OR REPLACE FUNCTION public.adm_flow(p_token uuid, p_session uuid, p_action text, p_unlock boolean DEFAULT false, p_secs integer DEFAULT NULL::integer, p_no integer DEFAULT NULL::integer, p_pick boolean DEFAULT false)
  RETURNS jsonb
  LANGUAGE plpgsql
  SECURITY DEFINER
  SET search_path TO 'public', 'extensions'
 AS $function$
-declare s sessions; n int; total int;
+declare s sessions; n int; total int; v_name text; v_seq int; v_expl text;
 begin
   perform _admin(p_token);
   select * into s from sessions where id = p_session for update;
   if not found then raise exception 'Sesi tidak ditemukan.'; end if;
   n := _bsize(s); total := cardinality(s.question_ids);
-  if p_action not in ('start', 'end', 'unlock') then raise exception 'Aksi tidak dikenal.'; end if;
+  if p_action not in ('start', 'end', 'unlock', 'spot', 'unspot') then raise exception 'Aksi tidak dikenal.'; end if;
 
   if p_action = 'start' then
     if not _discussing(s) then
-      update sessions set discuss_log = s.discuss_log || jsonb_build_array(jsonb_build_object('s', now(), 'e', null)) where id = s.id;
+      update sessions set discuss_log = s.discuss_log || jsonb_build_array(
+               jsonb_build_object('s', now(), 'e', null, 'p', case when p_secs is not null and p_secs between 60 and 7200 then p_secs end)),
+             spotlight = null
+       where id = s.id;
     end if;
   elsif p_action = 'end' then
     if _discussing(s) then
       update sessions
          set discuss_log = (select coalesce(jsonb_agg(case when d ->> 'e' is null then jsonb_set(d, '{e}', to_jsonb(now())) else d end order by ord), '[]'::jsonb)
-                              from jsonb_array_elements(s.discuss_log) with ordinality as t(d, ord))
+                              from jsonb_array_elements(s.discuss_log) with ordinality as t(d, ord)),
+             spotlight = null
        where id = s.id;
     end if;
+  elsif p_action = 'spot' then
+    if p_no is null or p_no < 1 or p_no > total then raise exception 'Nomor soal tidak valid.'; end if;
+    v_seq := coalesce((s.spotlight ->> 'seq')::int, 0) + 1;
+    if p_pick then
+      -- pilih acak satu peserta yang menjawab soal ini dengan benar (dan sudah menyelesaikannya)
+      select p.name into v_name
+        from attempts t join profiles p on p.id = t.profile_id
+        join question_keys k on k.question_id = s.question_ids[p_no]
+       where t.session_id = s.id and t.answers ->> (s.question_ids[p_no]::text) = k.answer
+         and (t.submitted_at is not null or s.feedback_mode = 'each' or (s.feedback_mode ~ '^[0-9]' and t.locked_n >= p_no))
+       order by random() limit 1;
+    end if;
+    update sessions set spotlight = jsonb_build_object('no', p_no, 'seq', v_seq, 'explainer', v_name) where id = s.id;
+    return jsonb_build_object('ok', true, 'explainer', v_name);
+  elsif p_action = 'unspot' then
+    update sessions set spotlight = null where id = s.id;
   end if;
   if (p_action = 'unlock' or (p_action = 'end' and p_unlock)) and s.lock_mode = 'locked' and n is not null then
     update sessions set unlocked_n = least(total, s.unlocked_n + n) where id = s.id;
@@ -715,17 +748,18 @@ CREATE OR REPLACE FUNCTION public.adm_flow_state(p_token uuid, p_session uuid)
  STABLE SECURITY DEFINER
  SET search_path TO 'public', 'extensions'
 AS $function$
-declare s sessions; v_since int; n int;
+declare s sessions; v_since int; n int; v_open jsonb;
 begin
   perform _admin(p_token);
   select * into s from sessions where id = p_session;
   if not found then raise exception 'Sesi tidak ditemukan.'; end if;
   n := _bsize(s);
-  select extract(epoch from (now() - (d ->> 's')::timestamptz))::int into v_since
-    from jsonb_array_elements(s.discuss_log) d where d ->> 'e' is null limit 1;
+  v_open := _dopen(s);
+  if v_open is not null then v_since := extract(epoch from (now() - (v_open ->> 's')::timestamptz))::int; end if;
   return jsonb_build_object(
     'total', cardinality(s.question_ids), 'block', n, 'lock_mode', s.lock_mode, 'unlocked_n', s.unlocked_n,
-    'ketat', s.ketat, 'status', s.status, 'discussing', _discussing(s), 'since', v_since,
+    'ketat', s.ketat, 'status', s.status, 'discussing', _discussing(s), 'since', v_since, 'plan', (v_open ->> 'p')::int,
+    'spot', s.spotlight,
     'disc_secs', floor(_paused_secs(s.discuss_log, s.created_at, now()))::int,
     'disc_count', jsonb_array_length(s.discuss_log),
     'max_fin', case when n is null then 0 else coalesce((select max(case when t.submitted_at is not null then cardinality(s.question_ids) else t.locked_n end) / n
@@ -914,6 +948,27 @@ begin
 end $function$
 ;
 
+CREATE OR REPLACE FUNCTION public.adm_set_expl(p_token uuid, p_qid uuid, p_body text)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions'
+AS $function$
+declare r profiles;
+begin
+  r := _admin(p_token);
+  p_body := left(btrim(coalesce(p_body, '')), 3000);
+  if not exists (select 1 from questions where id = p_qid) then raise exception 'Soal tidak ditemukan.'; end if;
+  if p_body = '' then
+    delete from explanations where question_id = p_qid;
+  else
+    insert into explanations (question_id, body, updated_by) values (p_qid, p_body, r.id)
+    on conflict (question_id) do update set body = excluded.body, updated_by = excluded.updated_by, updated_at = now();
+  end if;
+  return jsonb_build_object('ok', true);
+end $function$
+;
+
 CREATE OR REPLACE FUNCTION public.adm_set_qtype(p_token uuid, p_qid uuid, p_type text)
  RETURNS jsonb
  LANGUAGE plpgsql
@@ -1040,6 +1095,63 @@ begin
   perform _admin(p_token);
   update questions set active = p_active where id = p_qid;
   return jsonb_build_object('ok', true);
+end $function$
+;
+
+CREATE OR REPLACE FUNCTION public.app_block_recap(p_token uuid, p_session uuid, p_block integer DEFAULT NULL::integer)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'public', 'extensions'
+AS $function$
+declare r profiles; s sessions; a attempts; n int; total int; fin int; a0 int; b0 int; b1 int; v jsonb; v_final int; v_all int; v_step boolean;
+begin
+  r := _me(p_token);
+  select * into s from sessions where id = p_session and owner is null;
+  if not found then raise exception 'Sesi tidak ditemukan.'; end if;
+  select * into a from attempts where session_id = s.id and profile_id = r.id;
+  if not found then raise exception 'Kamu belum memulai sesi ini.'; end if;
+  n := _bsize(s);
+  if n is null then raise exception 'Sesi ini tidak memakai bagian.'; end if;
+  total := cardinality(s.question_ids);
+  fin := case when a.submitted_at is not null then total else a.locked_n end;
+  v_step := s.feedback_mode ~ 's$';
+  if fin = 0 then return jsonb_build_object('block', null, 'qs', '[]'::jsonb, 'blocks', 0); end if;
+  if p_block is null then p_block := (fin + n - 1) / n; end if;
+  a0 := (p_block - 1) * n + 1; b0 := least(p_block * n, total);
+  if a0 > fin then return jsonb_build_object('block', p_block, 'qs', '[]'::jsonb, 'blocks', (fin + n - 1) / n); end if;
+  b1 := least(b0, fin);
+
+  select count(*) filter (where t.submitted_at is not null or t.locked_n >= b0), count(*) into v_final, v_all
+    from attempts t where t.session_id = s.id;
+
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'no', u.ord, 'sy', coalesce(b.system, b.name), 'ty', coalesce(q.qtype, 'Lainnya'),
+           'mine', a.answers ->> (q.id::text),
+           'show', rv.shw,
+           'key', case when rv.shw then k.answer end,
+           'n', case when rv.shw then st.n end, 'ok', case when rv.shw then st.ok end, 'd', case when rv.shw then st.d end,
+           'hands', (select count(*) from hand_votes h where h.session_id = s.id and h.question_id = q.id),
+           'my_hand', exists (select 1 from hand_votes h where h.session_id = s.id and h.question_id = q.id and h.profile_id = r.id),
+           'expl', case when rv.shw then (select e.body from explanations e where e.question_id = q.id) end
+         ) order by u.ord), '[]'::jsonb) into v
+  from unnest(s.question_ids) with ordinality as u(qid, ord)
+  join questions q on q.id = u.qid join banks b on b.id = q.bank_id
+  left join question_keys k on k.question_id = q.id
+  cross join lateral (select (not v_step) or a.submitted_at is not null or q.id = any(a.revealed) as shw) rv
+  cross join lateral (
+    select count(*)::int as n,
+           (count(*) filter (where t.answers ->> (q.id::text) = k.answer))::int as ok,
+           jsonb_build_object('A', count(*) filter (where t.answers ->> (q.id::text) = 'A'), 'B', count(*) filter (where t.answers ->> (q.id::text) = 'B'),
+                              'C', count(*) filter (where t.answers ->> (q.id::text) = 'C'), 'D', count(*) filter (where t.answers ->> (q.id::text) = 'D'),
+                              'E', count(*) filter (where t.answers ->> (q.id::text) = 'E')) as d
+    from attempts t
+    where t.session_id = s.id and (t.submitted_at is not null or t.locked_n >= b0)
+  ) st
+  where u.ord between a0 and b1;
+
+  return jsonb_build_object('block', p_block, 'from', a0, 'to', b0, 'final', v_final, 'all', v_all,
+                            'blocks', (fin + n - 1) / n, 'qs', v);
 end $function$
 ;
 
@@ -1176,6 +1288,35 @@ begin
   perform _blk_sync(s.id, r.id);
   select * into a from attempts where id = a.id;
   return jsonb_build_object('locked', a.locked_n) || _blk_info(s, a);
+end $function$
+;
+
+CREATE OR REPLACE FUNCTION public.app_hand(p_token uuid, p_session uuid, p_qid uuid, p_on boolean)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions'
+AS $function$
+declare r profiles; s sessions; a attempts; idx int; fin int; v_n int;
+begin
+  r := _me(p_token);
+  select * into s from sessions where id = p_session and owner is null;
+  if not found then raise exception 'Sesi tidak ditemukan.'; end if;
+  select * into a from attempts where session_id = s.id and profile_id = r.id;
+  if not found then raise exception 'Kamu belum memulai sesi ini.'; end if;
+  idx := array_position(s.question_ids, p_qid);
+  if idx is null then raise exception 'Soal tidak ada di sesi ini.'; end if;
+  fin := case when a.submitted_at is not null then cardinality(s.question_ids)
+              when s.feedback_mode = 'each' and a.answers ? p_qid::text then idx
+              when s.feedback_mode ~ '^[0-9]' then a.locked_n else 0 end;
+  if idx > fin then raise exception 'Selesaikan soal ini dulu sebelum meminta dibahas.'; end if;
+  if p_on then
+    insert into hand_votes (session_id, profile_id, question_id) values (s.id, r.id, p_qid) on conflict do nothing;
+  else
+    delete from hand_votes where session_id = s.id and profile_id = r.id and question_id = p_qid;
+  end if;
+  select count(*) into v_n from hand_votes where session_id = s.id and question_id = p_qid;
+  return jsonb_build_object('ok', true, 'hands', v_n);
 end $function$
 ;
 
@@ -1383,10 +1524,10 @@ CREATE OR REPLACE FUNCTION public.app_peers(p_token uuid, p_session uuid, p_qids
  SECURITY DEFINER
  SET search_path TO 'public', 'extensions'
 AS $function$
-declare r profiles; s sessions; a attempts; res jsonb := '{}'::jsonb; qid uuid; idx int; ok boolean; v jsonb; k text;
+declare r profiles; s sessions; a attempts; res jsonb := '{}'::jsonb; qid uuid; idx int; ok boolean; v jsonb; k text; v_e text;
 begin
   r := _me(p_token);
-  select * into s from sessions where id = p_session and owner is null;
+  select * into s from sessions where id = p_session and (owner is null or owner = r.id);
   if not found then return res; end if;
   select * into a from attempts where session_id = s.id and profile_id = r.id;
   if not found then return res; end if;
@@ -1399,17 +1540,22 @@ begin
     continue when not ok;
     select answer into k from question_keys where question_id = qid;
     continue when k is null;
-    select jsonb_build_object('n', count(*), 'ok', count(*) filter (where t.answers ->> qid::text = k),
-             'd', jsonb_build_object(
-               'A', count(*) filter (where t.answers ->> qid::text = 'A'), 'B', count(*) filter (where t.answers ->> qid::text = 'B'),
-               'C', count(*) filter (where t.answers ->> qid::text = 'C'), 'D', count(*) filter (where t.answers ->> qid::text = 'D'),
-               'E', count(*) filter (where t.answers ->> qid::text = 'E'))) into v
-    from attempts t
-    where t.session_id = s.id
-      and (t.submitted_at is not null
-           or (s.feedback_mode = 'each' and t.answers ? qid::text)
-           or (s.feedback_mode ~ '^[0-9]' and idx <= t.locked_n));
-    res := res || jsonb_build_object(qid::text, v);
+    select body into v_e from explanations where question_id = qid;
+    if s.owner is null then
+      select jsonb_build_object('n', count(*), 'ok', count(*) filter (where t.answers ->> qid::text = k),
+               'd', jsonb_build_object(
+                 'A', count(*) filter (where t.answers ->> qid::text = 'A'), 'B', count(*) filter (where t.answers ->> qid::text = 'B'),
+                 'C', count(*) filter (where t.answers ->> qid::text = 'C'), 'D', count(*) filter (where t.answers ->> qid::text = 'D'),
+                 'E', count(*) filter (where t.answers ->> qid::text = 'E'))) into v
+      from attempts t
+      where t.session_id = s.id
+        and (t.submitted_at is not null
+             or (s.feedback_mode = 'each' and t.answers ? qid::text)
+             or (s.feedback_mode ~ '^[0-9]' and idx <= t.locked_n));
+    else
+      v := '{}'::jsonb;
+    end if;
+    res := res || jsonb_build_object(qid::text, v || jsonb_build_object('e', v_e));
   end loop;
   return res;
 end $function$
@@ -1537,7 +1683,7 @@ CREATE OR REPLACE FUNCTION public.app_rev(p_token uuid, p_session uuid)
  SECURITY DEFINER
  SET search_path TO 'public', 'extensions'
 AS $function$
-declare r profiles; s sessions; a attempts; v_has boolean;
+declare r profiles; s sessions; a attempts; v_has boolean; v_d jsonb;
 begin
   r := _me(p_token);
   select * into s from sessions where id = p_session and (owner is null or owner = r.id);
@@ -1548,12 +1694,16 @@ begin
   if v_has and a.submitted_at is null then
     update attempts set last_seen = now() where id = a.id;
   end if;
+  v_d := _dopen(s);
   return jsonb_build_object('rev', s.rev, 'notice', s.notice,
     'submitted', coalesce(v_has and a.submitted_at is not null, false),
     'discussing', _discussing(s), 'unlocked_n', s.unlocked_n, 'lock_mode', s.lock_mode,
     'paused', v_has and _is_paused(a),
     'locked', case when v_has then a.locked_n end,
     'bp', case when v_has then _blk_peers(s, a) end,
+    'spot', s.spotlight,
+    'dplan', (v_d ->> 'p')::int,
+    'dsince', case when v_d is not null then extract(epoch from (now() - (v_d ->> 's')::timestamptz))::int end,
     'elapsed', case when v_has and a.submitted_at is null then _elapsed(s, a) end)
     || case when v_has and a.submitted_at is null then _blk_info(s, a) else '{}'::jsonb end;
 end $function$
@@ -1692,7 +1842,7 @@ CREATE OR REPLACE FUNCTION public.app_start(p_token uuid, p_session uuid)
  SECURITY DEFINER
  SET search_path TO 'public', 'extensions'
 AS $function$
-declare r profiles; s sessions; a attempts; v_q jsonb; v_open int;
+declare r profiles; s sessions; a attempts; v_q jsonb; v_open int; v_d jsonb;
 begin
   r := _me(p_token);
   select * into s from sessions where id = p_session and (owner is null or owner = r.id);
@@ -1712,6 +1862,7 @@ begin
   select * into a from attempts where id = a.id;
 
   v_open := _open_for(s, a);
+  v_d := _dopen(s);
   select coalesce(jsonb_agg(
            case when v_open is not null and u.ord > v_open
                 then jsonb_build_object('id', q.id, 'no', u.ord, 'locked', true)
@@ -1740,6 +1891,9 @@ begin
     'notes', coalesce((select jsonb_object_agg(n.question_id::text, n.body) from notes n
                         where n.profile_id = r.id and n.question_id = any(s.question_ids)), '{}'::jsonb),
     'bp', _blk_peers(s, a),
+    'spot', s.spotlight,
+    'dplan', (v_d ->> 'p')::int,
+    'dsince', case when v_d is not null then extract(epoch from (now() - (v_d ->> 's')::timestamptz))::int end,
     'elapsed', _elapsed(s, a)
   ) || _blk_info(s, a);
 end $function$
