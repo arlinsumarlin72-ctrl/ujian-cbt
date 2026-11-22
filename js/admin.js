@@ -3,6 +3,8 @@
   'use strict';
   var A = window.App, H = A.H, esc = A.esc;
   var ST = { banks: [], sessions: [], people: [], im: null, openBank: null, qlist: [], saving: false };
+  var QTYPES = ['Diagnosis', 'Tatalaksana', 'Dosis obat', 'Farmakologi obat', 'Pemeriksaan penunjang', 'Temuan / gambaran klinis', 'Patofisiologi',
+    'Etiologi / faktor risiko', 'Komplikasi', 'Prognosis', 'Pencegahan / edukasi', 'Anatomi / lokalisasi', 'Staging / derajat / perhitungan', 'Konsep dasar', 'Lainnya'];
 
   var LIBS = {
     mammoth: 'https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js',
@@ -72,16 +74,21 @@
       }).join('') + '</div>' +
       '<div class="field" id="fbn-wrap" style="display:none"><label for="fbn">Tampilkan kunci setiap berapa nomor?</label><input id="fbn" name="fbn" class="input" type="number" min="1" max="500" placeholder="contoh: 5" style="max-width:180px"></div>' +
       '<div class="col" id="rv-wrap" style="gap:8px;display:none"><span class="label">Setelah blok diselesaikan, jawaban benar ditampilkan</span><div class="seg"><label class="on"><input type="radio" name="rv" value="all" checked data-change="rv-pick">Sekaligus</label><label><input type="radio" name="rv" value="step" data-change="rv-pick">Satu per satu</label></div></div></div>' +
+      '<div class="col" id="lk-wrap" style="gap:8px;display:none"><span class="label">Setelah satu bagian selesai dikerjakan</span><div class="seg"><label class="on"><input type="radio" name="lk" value="free" checked data-change="rv-pick">Langsung lanjut</label><label><input type="radio" name="lk" value="locked" data-change="rv-pick">Terkunci sampai admin membuka</label></div>' +
+      '<p class="small muted">Terkunci: peserta hanya melihat bagian yang sudah dibuka (isi soal bagian lain tidak dikirim). Setelah diskusi, admin membuka bagian berikutnya lewat tombol Peserta di daftar sesi.</p></div>' +
+      '<label class="checkrow"><span class="row row-c" style="gap:12px;flex-wrap:nowrap"><input type="checkbox" name="ketat"><span><span class="bold">Mode ketat</span><span class="small muted" style="display:block">Ujian layar penuh. Pindah tab, pindah aplikasi, atau keluar layar penuh dicatat dan terlihat admin. Browser tidak bisa memblokir aplikasi lain, hanya mendeteksi.</span></span></span></label>' +
+      '<label class="checkrow"><span class="row row-c" style="gap:12px;flex-wrap:nowrap"><input type="checkbox" name="pause"><span><span class="bold">Peserta boleh jeda mandiri</span><span class="small muted" style="display:block">Tombol Jeda menghentikan waktu pribadi peserta dan menyembunyikan soal. Cocok untuk belajar santai, tidak bisa bersama mode ketat.</span></span></span></label>' +
       '<button class="btn btn-primary" style="height:50px" type="submit"' + (avail.length ? '' : ' disabled') + '>Buat sesi dan acak soal</button>' +
       '<p class="small muted">Soal diacak satu kali saat sesi dibuat, jadi semua peserta mendapat set yang sama. Kalau memilih beberapa sistem, jumlah soal dibagi rata per sistem (Kulit &amp; Kelamin, GEH, Neurologi, Obstetri &amp; Ginekologi).</p></form>' +
       '<div class="card grow" style="flex:1 1 460px"><h2 class="bold" style="font-size:20px">Daftar sesi</h2>' +
       (ST.sessions.length ? '<div class="scroll-x"><table class="table"><thead><tr><th>Sesi</th><th>Soal</th><th>Selesai</th><th>Status</th><th>Aksi</th></tr></thead><tbody>' +
         ST.sessions.map(function (s) {
-          return '<tr><td><span class="bold">' + esc(s.title) + '</span><div class="small muted">' + (s.timer_minutes ? s.timer_minutes + ' menit' : 'tanpa timer') + ' · ' + esc(A.fbLabel(s.feedback_mode)) + '</div></td>' +
+          return '<tr><td><span class="bold">' + esc(s.title) + '</span><div class="small muted">' + (s.timer_minutes ? s.timer_minutes + ' menit' : 'tanpa timer') + ' · ' + esc(A.fbLabel(s.feedback_mode)) + '</div>' +
+            ((s.lock_mode === 'locked' || s.ketat || s.discussing || s.allow_pause) ? '<div class="row" style="gap:6px;margin-top:4px">' + (s.lock_mode === 'locked' ? '<span class="badge b-info">Terkunci per bagian</span>' : '') + (s.ketat ? '<span class="badge b-warn">Mode ketat</span>' : '') + (s.allow_pause ? '<span class="badge b-info">Boleh jeda</span>' : '') + (s.discussing ? '<span class="badge b-info">Sedang diskusi</span>' : '') + '</div>' : '') + '</td>' +
             '<td>' + s.total + '</td><td>' + s.finished + (s.ongoing ? ' <span class="small muted">(+' + s.ongoing + ' berjalan)</span>' : '') + '</td>' +
             '<td>' + (s.status === 'open' ? '<span class="badge b-info">Terbuka</span>' : '<span class="badge b-bad">Ditutup</span>') + '</td>' +
             '<td><div class="row" style="gap:8px"><button class="btn btn-sm" type="button" data-act="sess-toggle" data-v="' + s.id + '" data-s="' + s.status + '">' + (s.status === 'open' ? 'Tutup' : 'Buka') + '</button>' +
-            '<button class="btn btn-sm" type="button" data-act="sess-people" data-v="' + s.id + '">' + (ST.openSess === s.id ? 'Tutup peserta' : 'Peserta') + '</button>' +
+            '<button class="btn btn-sm" type="button" data-act="sess-people" data-v="' + s.id + '">' + (ST.openSess === s.id ? 'Tutup panel' : 'Peserta dan diskusi') + '</button>' +
             '<a class="btn btn-sm" href="#/peringkat/' + s.id + '">Peringkat</a>' +
             '<button class="btn btn-sm btn-danger" type="button" data-act="sess-del" data-v="' + s.id + '" data-t="' + esc(s.title) + '">Hapus</button></div></td></tr>' + (ST.openSess === s.id ? attHtml(s) : '');
         }).join('') + '</tbody></table></div>' : '<p class="muted">Belum ada sesi.</p>') + '</div></div>';
@@ -114,7 +121,9 @@
   H['fb-pick'] = function (el) {
     el.closest('.seg').querySelectorAll('label').forEach(function (l) { l.classList.toggle('on', l.contains(el)); });
     var w = document.getElementById('fbn-wrap'); if (w) w.style.display = el.value === 'custom' ? '' : 'none';
-    var rw = document.getElementById('rv-wrap'); if (rw) rw.style.display = (el.value === '10' || el.value === '20' || el.value === 'custom') ? '' : 'none';
+    var show = (el.value === '10' || el.value === '20' || el.value === 'custom') ? '' : 'none';
+    var rw = document.getElementById('rv-wrap'); if (rw) rw.style.display = show;
+    var lw = document.getElementById('lk-wrap'); if (lw) lw.style.display = show;
   };
   H['rv-pick'] = function (el) {
     el.closest('.seg').querySelectorAll('label').forEach(function (l) { l.classList.toggle('on', l.contains(el)); });
@@ -130,39 +139,154 @@
       fb = String(nn);
     }
     if (/^[0-9]+$/.test(fb) && form.elements.rv && form.elements.rv.value === 'step') fb += 's';
+    if (form.elements.pause && form.elements.pause.checked && form.elements.ketat && form.elements.ketat.checked) { A.toast('Jeda mandiri tidak bisa dipakai bersama mode ketat.', true); return; }
     btn.disabled = true;
     try {
       await Api.call('adm_create_session', {
         p_title: form.elements.title.value, p_bank_ids: banks, p_count: parseInt(form.elements.count.value, 10),
         p_timer: timer ? parseInt(timer, 10) : null, p_feedback: fb,
-        p_exclude_sessions: exSessions()
+        p_exclude_sessions: exSessions(),
+        p_lock: /^[0-9]+s?$/.test(fb) && form.elements.lk ? form.elements.lk.value : 'free',
+        p_strict: !!(form.elements.ketat && form.elements.ketat.checked),
+        p_pause: !!(form.elements.pause && form.elements.pause.checked)
       });
       A.toast('Sesi dibuat. Peserta bisa langsung mengerjakan.');
       sesiTab();
     } catch (e) { A.toast(e.message, true); btn.disabled = false; }
   };
-  function attHtml(s) {
-    var att = ST.att || [], pending = att.filter(function (x) { return !x.submitted; }).length;
-    return '<tr><td colspan="5"><div class="col" style="gap:10px;padding:8px 0">' +
+  function ago(sec) {
+    if (sec == null) return 'belum terlihat';
+    if (sec < 15) return 'baru saja';
+    if (sec < 90) return sec + ' detik lalu';
+    return Math.round(sec / 60) + ' menit lalu';
+  }
+  var KIND = { tab: 'Pindah tab / aplikasi', blur: 'Jendela kehilangan fokus', fullscreen: 'Keluar layar penuh' };
+  function flowHtml() {
+    var f = ST.flow; if (!f) return '';
+    var n = f.block, parts = n ? Math.ceil(f.total / n) : 0, locked = f.lock_mode === 'locked' && n;
+    var openParts = locked ? Math.min(parts, Math.ceil(f.unlocked_n / n)) : parts;
+    var hasNext = locked && f.unlocked_n < f.total;
+    var nextNo = locked ? Math.floor(f.unlocked_n / n) + 1 : 0, nextA = f.unlocked_n + 1, nextB = Math.min(f.total, f.unlocked_n + (n || 0));
+    var info = locked ? 'Bagian terbuka: <b>' + openParts + ' dari ' + parts + '</b> (soal 1-' + Math.min(f.unlocked_n, f.total) + ')' :
+      (n ? 'Peserta bebas lanjut antar bagian (' + parts + ' bagian)' : 'Sesi tanpa pembagian bagian');
+    var btns = '';
+    if (!f.discussing) {
+      btns += '<button class="btn btn-sm btn-primary" type="button" data-act="flow" data-a="start">Mulai diskusi</button>';
+      if (hasNext) btns += '<button class="btn btn-sm" type="button" data-act="flow" data-a="unlock">Buka bagian ' + nextNo + ' (soal ' + nextA + '-' + nextB + ') tanpa diskusi</button>';
+    } else {
+      btns += '<button class="btn btn-sm' + (hasNext ? '' : ' btn-primary') + '" type="button" data-act="flow" data-a="end" data-u="0">Selesai diskusi</button>';
+      if (hasNext) btns += '<button class="btn btn-sm btn-primary" type="button" data-act="flow" data-a="end" data-u="1">Selesai diskusi dan buka bagian ' + nextNo + ' (soal ' + nextA + '-' + nextB + ')</button>';
+    }
+    return '<div class="flowbox' + (f.discussing ? ' live' : '') + '"><div class="row row-c between" style="gap:12px"><div class="col" style="gap:2px"><span class="bold">' + (f.discussing ? 'Diskusi sedang berlangsung. Waktu peserta dihentikan.' : 'Kendali sesi') + '</span><span class="small muted">' + info + '</span></div>' +
+      (f.discussing ? '<span class="flowclock" id="flowclock">' + A.clock(f.since || 0) + '</span>' : '') + '</div>' +
+      '<div class="row" style="gap:8px">' + btns + '</div>' +
+      '<span class="small muted">Total diskusi ' + dur0(f.disc_secs) + ' dalam ' + f.disc_count + ' kali. Waktu diskusi tidak dihitung dalam waktu mengerjakan peserta.</span></div>';
+  }
+  function dur0(sec) { sec = Math.max(0, Math.round(sec || 0)); var m = Math.floor(sec / 60); return m ? m + ' menit ' + (sec % 60) + ' detik' : sec + ' detik'; }
+  function lv(p) { return p < 50 ? 'lo' : (p < 70 ? 'mid' : 'hi'); }
+  function recapHtml() {
+    var f = ST.flow, rc = ST.recap; if (!f || !f.block) return '';
+    var parts = Math.ceil(f.total / f.block);
+    if (!rc) return '<div class="flowbox"><span class="bold">Rekap bagian untuk diskusi</span><span class="small muted">Muncul setelah ada peserta yang menyelesaikan satu bagian (tombol Selesaikan blok).</span></div>';
+    var opts = ''; for (var i = 1; i <= parts; i++) opts += '<option value="' + i + '"' + (i === rc.block ? ' selected' : '') + '>Bagian ' + i + ' (soal ' + ((i - 1) * f.block + 1) + '-' + Math.min(i * f.block, f.total) + ')</option>';
+    var rows = rc.qs.slice().sort(function (a, b) { return A.pct(a.ok, a.n) - A.pct(b.ok, b.n) || a.no - b.no; });
+    var first = 0;
+    var html = rows.map(function (q) {
+      var p = A.pct(q.ok, q.n), hot = rc.final >= 2 && p < 70 && first < 3; if (hot) first++;
+      var top = null; ['A', 'B', 'C', 'D', 'E'].forEach(function (L) { if (L !== q.key && (q.d[L] || 0) > 0 && (!top || q.d[L] > q.d[top])) top = L; });
+      var dist = ['A', 'B', 'C', 'D', 'E'].map(function (L) {
+        var c = q.d[L] || 0, w = q.n ? Math.round(100 * c / q.n) : 0;
+        return '<span class="dist ' + (L === q.key ? 'k' : (L === top ? 'w' : '')) + '" title="' + c + ' memilih ' + L + '"><b>' + L + '</b><i style="width:' + Math.max(w, c ? 6 : 0) + '%"></i><em>' + c + '</em></span>';
+      }).join('');
+      return '<div class="rrow"><span class="rk">' + q.no + '</span><div class="grow col" style="gap:4px"><div class="small"><b>' + esc(q.sy) + '</b> · ' + esc(q.ty) + ' · kunci <b>' + esc(q.key || '-') + '</b>' + (hot ? ' <span class="badge b-bad">Bahas dulu</span>' : '') + '</div>' +
+        '<div class="small muted">' + esc(q.stem) + '</div><div class="dists">' + dist + '</div></div>' +
+        '<div class="pcb ' + lv(p) + '"><b>' + (q.n ? p + '%' : '-') + '</b><span>' + q.ok + '/' + q.n + '</span></div></div>';
+    }).join('');
+    return '<div class="flowbox"><div class="row row-c between" style="gap:10px"><span class="bold">Rekap untuk diskusi: soal terendah dulu</span><select class="input" data-change="recap-pick" style="max-width:240px;height:36px" aria-label="Pilih bagian">' + opts + '</select></div>' +
+      '<span class="small muted">' + rc.final + ' peserta sudah menyelesaikan bagian ini' + (rc.waiting.length ? '. Belum selesai: ' + esc(rc.waiting.join(', ')) : '') + '. Batang hijau = kunci, merah = jawaban salah terbanyak.</span>' +
+      '<div class="col" style="gap:8px;max-height:60vh;overflow:auto">' + html + '</div></div>';
+  }
+  function attInner(s) {
+    var att = ST.att || [], pending = att.filter(function (x) { return !x.submitted; }).length, strict = ST.flow && ST.flow.ketat;
+    return '<div class="col" style="gap:10px;padding:8px 0">' + flowHtml() + recapHtml() +
       '<div class="row row-c between"><span class="bold">Peserta di sesi ini (' + att.length + ')</span>' +
       (pending ? '<button class="btn btn-sm btn-primary" type="button" data-act="att-submit-all" data-v="' + s.id + '">Kumpulkan semua yang belum selesai (' + pending + ')</button>' : '') + '</div>' +
-      (att.length ? att.map(function (x) {
-        return '<div class="row row-c between" style="gap:10px;border-top:1px solid var(--line-2);padding-top:8px"><span class="row row-c" style="gap:10px;flex-wrap:nowrap">' + A.avatar(x.name, x.avatar_color) + '<span class="bold">' + esc(x.name) + '</span></span>' +
-          '<span class="small muted">' + (x.submitted ? 'Selesai, skor ' + x.score + ' dari ' + x.total : 'Mengerjakan: ' + x.answered + ' dari ' + x.total + ' terjawab' + (x.locked ? ', ' + x.locked + ' soal terkunci' : '')) + '</span>' +
-          (x.submitted ? '<span class="badge b-ok">Sudah dikumpulkan</span>' : '<button class="btn btn-sm" type="button" data-act="att-submit" data-s="' + s.id + '" data-v="' + x.profile_id + '" data-n="' + esc(x.name) + '">Kumpulkan jawabannya</button>') + '</div>';
-      }).join('') : '<p class="muted small">Belum ada peserta yang membuka sesi ini.</p>') +
-      '</div></td></tr>';
+      (att.length ? att.map(function (x, i) {
+        var pbar = '<div class="pbar" style="width:120px"><i style="width:' + Math.round(100 * x.answered / Math.max(1, x.total)) + '%"></i></div>';
+        return '<div class="row row-c between" style="gap:10px;border-top:1px solid var(--line-2);padding-top:8px"><span class="row row-c" style="gap:10px;flex-wrap:nowrap">' + A.avatar(x.name, x.avatar_color) + '<span class="col" style="gap:0"><span class="bold">' + esc(x.name) + '</span>' +
+          '<span class="small muted">' + (x.submitted ? 'Selesai, skor ' + x.score + ' dari ' + x.total : 'Mengerjakan: ' + x.answered + ' dari ' + x.total + ' terjawab' + (x.locked ? ', ' + x.locked + ' soal diselesaikan' : '') + ' · aktif ' + ago(x.seen)) + '</span></span></span>' +
+          (x.submitted ? '' : pbar) +
+          '<span class="row row-c" style="gap:8px">' + (strict ? (x.viol ? '<button class="btn btn-sm btn-danger" type="button" data-act="viol-detail" data-i="' + i + '">Keluar halaman ' + x.viol + 'x (' + dur0(x.viol_secs) + ')</button>' : '<span class="badge b-ok">Tidak ada pelanggaran</span>') : '') +
+          (x.submitted ? '<a class="btn btn-sm" href="#/hasilpeserta/' + s.id + '/' + x.profile_id + '">Analisis</a><a class="btn btn-sm" href="#/tinjaupeserta/' + s.id + '/' + x.profile_id + '">Tinjau soal</a><span class="badge b-ok">Sudah dikumpulkan</span>' : '<button class="btn btn-sm" type="button" data-act="att-submit" data-s="' + s.id + '" data-v="' + x.profile_id + '" data-n="' + esc(x.name) + '">Kumpulkan jawabannya</button>') + '</span></div>';
+      }).join('') : '<p class="muted small">Belum ada peserta yang membuka sesi ini.</p>') + '</div>';
+  }
+  function attHtml(s) { return '<tr><td colspan="5" id="att-panel">' + attInner(s) + '</td></tr>'; }
+  async function loadPanel() {
+    var id = ST.openSess; if (!id) return;
+    var r = await Promise.all([Api.call('adm_attempts', { p_session: id }), Api.call('adm_flow_state', { p_session: id })]);
+    if (ST.openSess !== id) return;
+    ST.att = r[0]; ST.flow = r[1]; ST.flowAt = Date.now();
+    var fl = r[1], parts = fl.block ? Math.ceil(fl.total / fl.block) : 0;
+    var blk = ST.recapPick || (fl.block && fl.max_fin >= 1 ? Math.min(fl.max_fin, parts) : 0);
+    ST.recap = null;
+    if (fl.block && blk >= 1) { try { ST.recap = await Api.call('adm_block_recap', { p_session: id, p_block: blk }); } catch (e) { ST.recap = null; } }
+  }
+  async function pollPanel() {
+    try {
+      await loadPanel();
+      var ae = document.activeElement;
+      if (ae && ae.closest && ae.closest('#att-panel')) return;   // jangan ganggu saat admin sedang memilih sesuatu di panel
+      var s = ST.sessions.filter(function (x) { return x.id === ST.openSess; })[0], p = document.getElementById('att-panel');
+      if (s && p) p.innerHTML = attInner(s);
+    } catch (e) { /* abaikan, coba lagi nanti */ }
+  }
+  function startPanelTimers() {
+    clearInterval(ST.pollT); clearInterval(ST.clockT);
+    ST.pollT = setInterval(pollPanel, 5000);
+    ST.clockT = setInterval(function () {
+      var el = document.getElementById('flowclock');
+      if (el && ST.flow && ST.flow.discussing) el.textContent = A.clock((ST.flow.since || 0) + (Date.now() - ST.flowAt) / 1000);
+    }, 1000);
+    A.onCleanup(function () { clearInterval(ST.pollT); clearInterval(ST.clockT); });
   }
   async function reloadAtt() {
     ST.sessions = await Api.call('adm_sessions');
-    ST.att = ST.openSess ? await Api.call('adm_attempts', { p_session: ST.openSess }) : [];
+    if (ST.openSess) await loadPanel(); else { ST.att = []; ST.flow = null; }
     renderSesi();
   }
   H['sess-people'] = async function (el) {
     var id = el.dataset.v;
-    if (ST.openSess === id) { ST.openSess = null; ST.att = []; renderSesi(); return; }
-    try { ST.att = await Api.call('adm_attempts', { p_session: id }); ST.openSess = id; renderSesi(); }
+    if (ST.openSess === id) { ST.openSess = null; ST.att = []; ST.flow = null; ST.recap = null; ST.recapPick = null; clearInterval(ST.pollT); clearInterval(ST.clockT); renderSesi(); return; }
+    try { ST.openSess = id; ST.recapPick = null; await loadPanel(); renderSesi(); startPanelTimers(); }
+    catch (e) { ST.openSess = null; A.toast(e.message, true); }
+  };
+  H['recap-pick'] = async function (el) {
+    ST.recapPick = +el.value;
+    try { await loadPanel(); var s = ST.sessions.filter(function (x) { return x.id === ST.openSess; })[0], p = document.getElementById('att-panel'); if (s && p) p.innerHTML = attInner(s); }
     catch (e) { A.toast(e.message, true); }
+  };
+  H.flow = async function (el) {
+    var a = el.dataset.a, u = el.dataset.u === '1';
+    if (a === 'unlock') {
+      var ok = await A.confirmDialog('Buka bagian berikutnya?', 'Semua peserta langsung bisa mengerjakan bagian berikutnya tanpa diskusi.', 'Buka', false);
+      if (!ok) return;
+    }
+    el.disabled = true;
+    try {
+      await Api.call('adm_flow', { p_session: ST.openSess, p_action: a, p_unlock: u });
+      A.toast(a === 'start' ? 'Diskusi dimulai. Waktu peserta berhenti.' : a === 'end' ? (u ? 'Diskusi selesai dan bagian berikutnya dibuka.' : 'Diskusi selesai. Waktu berjalan lagi.') : 'Bagian berikutnya dibuka.');
+      await pollPanel();
+      ST.sessions = await Api.call('adm_sessions');
+    } catch (e) { A.toast(e.message, true); el.disabled = false; }
+  };
+  H['viol-detail'] = function (el) {
+    var x = (ST.att || [])[+el.dataset.i]; if (!x) return;
+    var log = (x.viol_log || []).slice().reverse().slice(0, 40);
+    A.dialog({ title: 'Keluar halaman: ' + x.name, text: x.viol + ' kejadian, total ' + dur0(x.viol_secs) + '. Pencatatan dihentikan saat diskusi.',
+      html: '<div style="max-height:46vh;overflow:auto">' + log.map(function (v) {
+        var t = new Date(v.t);
+        return '<div class="row between small" style="gap:10px;padding:6px 0;border-top:1px solid var(--line-2)"><span class="bold">' + esc(KIND[v.k] || v.k) + '</span><span class="muted">' + (isNaN(t) ? '' : t.toLocaleTimeString('id-ID')) + ' · ' + dur0(v.d) + '</span></div>';
+      }).join('') + '</div>', buttons: [{ label: 'Tutup', value: true, cls: 'btn-primary' }] });
   };
   H['att-submit'] = async function (el) {
     var ok = await A.confirmDialog('Kumpulkan jawaban ' + el.dataset.n + '?', 'Jawaban yang sudah terisi akan dikumpulkan dan dinilai sekarang. Peserta tidak bisa mengubahnya lagi.', 'Kumpulkan', false);
@@ -247,7 +371,9 @@
     return '<div style="max-height:420px;overflow:auto">' + ST.qlist.map(function (q) {
       return '<div class="qrow' + (q.active ? '' : ' off') + '"><div class="row row-c between" style="gap:8px;flex-wrap:nowrap"><span class="bold">' + (q.num != null ? q.num + '. ' : '') + esc((q.stem || '').slice(0, 140)) + (q.stem && q.stem.length > 140 ? '...' : '') + '</span>' +
         '<button class="btn btn-sm" type="button" data-act="q-toggle" data-v="' + q.id + '" data-a="' + q.active + '">' + (q.active ? 'Nonaktifkan' : 'Aktifkan') + '</button></div>' +
-        '<span class="qopts">Kunci: ' + esc(q.answer || '-') + ' · ' + q.options.length + ' pilihan' + (q.has_image ? ' · ada gambar' : '') + '</span></div>';
+        '<span class="qopts">Kunci: ' + esc(q.answer || '-') + ' · ' + q.options.length + ' pilihan' + (q.has_image ? ' · ada gambar' : '') + '</span>' +
+        '<label class="row row-c small" style="gap:8px;flex-wrap:nowrap"><span class="muted">Jenis soal</span><select class="input" style="height:32px;max-width:260px;font-size:13px" data-change="q-type" data-v="' + q.id + '" aria-label="Jenis soal nomor ' + (q.num != null ? q.num : '') + '">' +
+        (QTYPES.indexOf(q.qtype) < 0 ? '<option selected>' + esc(q.qtype) + '</option>' : '') + QTYPES.map(function (t) { return '<option' + (t === q.qtype ? ' selected' : '') + '>' + esc(t) + '</option>'; }).join('') + '</select></label></div>';
     }).join('') + '</div>';
   }
   H['bank-open'] = async function (el) {
@@ -268,6 +394,13 @@
       ST.banks = await Api.call('adm_banks');
       document.getElementById('bank-card').innerHTML = banksHtml();
       A.toast('Bank dihapus.');
+    } catch (e) { A.toast(e.message, true); }
+  };
+  H['q-type'] = async function (el) {
+    try {
+      await Api.call('adm_set_qtype', { p_qid: el.dataset.v, p_type: el.value });
+      var q = ST.qlist.filter(function (x) { return x.id === el.dataset.v; })[0]; if (q) q.qtype = el.value;
+      A.toast('Jenis soal diubah menjadi ' + el.value + '.');
     } catch (e) { A.toast(e.message, true); }
   };
   H['q-toggle'] = async function (el) {
